@@ -1,9 +1,11 @@
 const fs = require("fs");
 const path = require("path");
+
 const {
   PDFDocument,
   StandardFonts,
   rgb,
+  degrees,
 } = require("pdf-lib");
 
 const MM_TO_POINTS = 72 / 25.4;
@@ -35,13 +37,18 @@ function propertiesToObject(lineItem) {
     }
 
     result[property.name] = property.value;
-    result[normalizeKey(property.name)] = property.value;
+    result[normalizeKey(property.name)] =
+      property.value;
   }
 
   return result;
 }
 
-function getProperty(properties, possibleNames, fallback = "") {
+function getProperty(
+  properties,
+  possibleNames,
+  fallback = ""
+) {
   for (const name of possibleNames) {
     if (
       properties[name] !== undefined &&
@@ -58,7 +65,9 @@ function getProperty(properties, possibleNames, fallback = "") {
       properties[normalizedName] !== null &&
       String(properties[normalizedName]).trim() !== ""
     ) {
-      return String(properties[normalizedName]).trim();
+      return String(
+        properties[normalizedName]
+      ).trim();
     }
   }
 
@@ -96,18 +105,23 @@ function parseDate(value) {
 function addDays(date, numberOfDays) {
   const result = new Date(date);
 
-  result.setDate(result.getDate() + numberOfDays);
+  result.setDate(
+    result.getDate() + numberOfDays
+  );
 
   return result;
 }
 
 function formatDate(date) {
   const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(
-    2,
-    "0"
-  );
-  const day = String(date.getDate()).padStart(2, "0");
+
+  const month = String(
+    date.getMonth() + 1
+  ).padStart(2, "0");
+
+  const day = String(
+    date.getDate()
+  ).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
 }
@@ -120,7 +134,10 @@ function formatDisplayDate(date) {
   });
 }
 
-function parseHexColor(value, fallback = DEFAULT_ACCENT) {
+function parseHexColor(
+  value,
+  fallback = DEFAULT_ACCENT
+) {
   if (!value) {
     return fallback;
   }
@@ -133,9 +150,14 @@ function parseHexColor(value, fallback = DEFAULT_ACCENT) {
     return fallback;
   }
 
-  const red = parseInt(cleaned.slice(0, 2), 16) / 255;
-  const green = parseInt(cleaned.slice(2, 4), 16) / 255;
-  const blue = parseInt(cleaned.slice(4, 6), 16) / 255;
+  const red =
+    parseInt(cleaned.slice(0, 2), 16) / 255;
+
+  const green =
+    parseInt(cleaned.slice(2, 4), 16) / 255;
+
+  const blue =
+    parseInt(cleaned.slice(4, 6), 16) / 255;
 
   return rgb(red, green, blue);
 }
@@ -149,8 +171,18 @@ function initialsFromName(name) {
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 3)
-    .map((word) => word.charAt(0).toUpperCase())
+    .map((word) =>
+      word.charAt(0).toUpperCase()
+    )
     .join("");
+}
+
+function sanitizeFileValue(value, fallback) {
+  const sanitized = String(
+    value || fallback
+  ).replace(/[^a-zA-Z0-9-_]/g, "-");
+
+  return sanitized || fallback;
 }
 
 function drawWrappedText({
@@ -165,7 +197,10 @@ function drawWrappedText({
   color = BLACK,
   maxLines = 3,
 }) {
-  const words = String(text || "").split(/\s+/);
+  const words = String(text || "")
+    .split(/\s+/)
+    .filter(Boolean);
+
   const lines = [];
   let currentLine = "";
 
@@ -174,10 +209,11 @@ function drawWrappedText({
       ? `${currentLine} ${word}`
       : word;
 
-    const proposedWidth = font.widthOfTextAtSize(
-      proposedLine,
-      size
-    );
+    const proposedWidth =
+      font.widthOfTextAtSize(
+        proposedLine,
+        size
+      );
 
     if (proposedWidth <= maxWidth) {
       currentLine = proposedLine;
@@ -224,12 +260,22 @@ function drawWritingLines({
   color = GRAY,
   thickness = 0.55,
 }) {
-  for (let index = 0; index < count; index += 1) {
+  for (
+    let index = 0;
+    index < count;
+    index += 1
+  ) {
     const lineY = y - index * spacing;
 
     page.drawLine({
-      start: { x, y: lineY },
-      end: { x: x + width, y: lineY },
+      start: {
+        x,
+        y: lineY,
+      },
+      end: {
+        x: x + width,
+        y: lineY,
+      },
       thickness,
       color,
     });
@@ -254,13 +300,16 @@ function drawSectionLabel({
     color: accentColor,
   });
 
-  page.drawText(label.toUpperCase(), {
-    x: x + 10,
-    y,
-    size: 6.5,
-    font: boldFont,
-    color: BLACK,
-  });
+  page.drawText(
+    String(label || "").toUpperCase(),
+    {
+      x: x + 10,
+      y,
+      size: 6.5,
+      font: boldFont,
+      color: BLACK,
+    }
+  );
 
   if (prompt) {
     drawWrappedText({
@@ -278,8 +327,12 @@ function drawSectionLabel({
   }
 }
 
-function createJournalConfiguration(order, lineItem) {
-  const properties = propertiesToObject(lineItem);
+function createJournalConfiguration(
+  order,
+  lineItem
+) {
+  const properties =
+    propertiesToObject(lineItem);
 
   const customerName = [
     order.customer?.first_name,
@@ -315,6 +368,7 @@ function createJournalConfiguration(order, lineItem) {
       properties,
       [
         "Owner initials",
+        "Owner Initials",
         "Initials",
       ],
       ""
@@ -370,27 +424,30 @@ function createJournalConfiguration(order, lineItem) {
       "Today's Goal",
       "Todays Goal",
       "Daily goal prompt",
+      "Daily Goal Prompt",
     ],
     "What is your goal today?"
   );
 
-  const morningReflectionPrompt = getProperty(
-    properties,
-    [
-      "Morning reflection prompt",
-      "Morning Reflection Prompt",
-    ],
-    ""
-  );
+  const morningReflectionPrompt =
+    getProperty(
+      properties,
+      [
+        "Morning reflection prompt",
+        "Morning Reflection Prompt",
+      ],
+      ""
+    );
 
-  const eveningReflectionPrompt = getProperty(
-    properties,
-    [
-      "Evening reflection prompt",
-      "Evening Reflection Prompt",
-    ],
-    ""
-  );
+  const eveningReflectionPrompt =
+    getProperty(
+      properties,
+      [
+        "Evening reflection prompt",
+        "Evening Reflection Prompt",
+      ],
+      ""
+    );
 
   const careQuestionOne = getProperty(
     properties,
@@ -464,48 +521,72 @@ function createJournalConfiguration(order, lineItem) {
   };
 }
 
-async function generateJournalPDFs(order) {
+async function generateJournalPDFs(
+  order,
+  lineItem
+) {
+  if (!order) {
+    throw new Error(
+      "A Shopify order is required"
+    );
+  }
+
+  if (!lineItem) {
+    throw new Error(
+      "A Shopify line item is required for PDF generation"
+    );
+  }
+
+  if (!lineItem.id) {
+    throw new Error(
+      "The Shopify line item does not have an ID"
+    );
+  }
+
   const outputDirectory = path.join(
     __dirname,
     "..",
     "generated"
   );
 
-  await fs.promises.mkdir(outputDirectory, {
-    recursive: true,
-  });
+  await fs.promises.mkdir(
+    outputDirectory,
+    {
+      recursive: true,
+    }
+  );
 
   const orderNumber =
     order.order_number ||
     order.id ||
     Date.now();
 
-  const lineItem = order.line_items?.[0];
-
-  if (!lineItem) {
-    throw new Error(
-      "Shopify order does not contain any line items"
+  const configuration =
+    createJournalConfiguration(
+      order,
+      lineItem
     );
-  }
 
-  const configuration = createJournalConfiguration(
-    order,
-    lineItem
-  );
+  const safeOrderNumber =
+    sanitizeFileValue(
+      orderNumber,
+      "unknown-order"
+    );
 
-  const safeOrderNumber = String(orderNumber).replace(
-    /[^a-zA-Z0-9-_]/g,
-    "-"
-  );
+  const safeItemId =
+    sanitizeFileValue(
+      lineItem.id,
+      "unknown-item"
+    );
 
   const interiorPath = path.join(
     outputDirectory,
-    `order-${safeOrderNumber}-interior.pdf`
+    `order-${safeOrderNumber}-item-${safeItemId}-interior.pdf`
   );
 
   const coverPath = path.join(
     outputDirectory,
-    `order-${safeOrderNumber}-cover.pdf`
+    `order-${safeOrderNumber}-item-${safeItemId}-cover.pdf`
   );
 
   await createInteriorPDF({
@@ -521,6 +602,9 @@ async function generateJournalPDFs(order) {
   return {
     interiorPath,
     coverPath,
+    itemId: lineItem.id,
+    orderId: order.id,
+    orderNumber,
     configuration,
   };
 }
@@ -542,19 +626,23 @@ async function createInteriorPDF({
   bodyNotesPrompt,
   accentColor,
 }) {
-  const pdfDocument = await PDFDocument.create();
+  const pdfDocument =
+    await PDFDocument.create();
 
-  const font = await pdfDocument.embedFont(
-    StandardFonts.Helvetica
-  );
+  const font =
+    await pdfDocument.embedFont(
+      StandardFonts.Helvetica
+    );
 
-  const boldFont = await pdfDocument.embedFont(
-    StandardFonts.HelveticaBold
-  );
+  const boldFont =
+    await pdfDocument.embedFont(
+      StandardFonts.HelveticaBold
+    );
 
-  const italicFont = await pdfDocument.embedFont(
-    StandardFonts.HelveticaOblique
-  );
+  const italicFont =
+    await pdfDocument.embedFont(
+      StandardFonts.HelveticaOblique
+    );
 
   /*
   |--------------------------------------------------------------------------
@@ -562,25 +650,30 @@ async function createInteriorPDF({
   |--------------------------------------------------------------------------
   */
 
-  const titlePage = pdfDocument.addPage([
-    INTERIOR_WIDTH,
-    INTERIOR_HEIGHT,
-  ]);
+  const titlePage =
+    pdfDocument.addPage([
+      INTERIOR_WIDTH,
+      INTERIOR_HEIGHT,
+    ]);
 
-  titlePage.drawText(initials || "", {
-    x: 44,
-    y: INTERIOR_HEIGHT - 65,
-    size: 15,
-    font: boldFont,
-    color: accentColor,
-  });
+  titlePage.drawText(
+    initials || "",
+    {
+      x: 44,
+      y: INTERIOR_HEIGHT - 65,
+      size: 15,
+      font: boldFont,
+      color: accentColor,
+    }
+  );
 
   drawWrappedText({
     page: titlePage,
     text: journalTitle,
     x: 44,
     y: INTERIOR_HEIGHT - 105,
-    maxWidth: INTERIOR_WIDTH - 88,
+    maxWidth:
+      INTERIOR_WIDTH - 88,
     font: boldFont,
     size: 30,
     lineHeight: 32,
@@ -594,7 +687,8 @@ async function createInteriorPDF({
       text: subtitle.toUpperCase(),
       x: 44,
       y: INTERIOR_HEIGHT - 195,
-      maxWidth: INTERIOR_WIDTH - 88,
+      maxWidth:
+        INTERIOR_WIDTH - 88,
       font: boldFont,
       size: 10,
       lineHeight: 13,
@@ -603,7 +697,10 @@ async function createInteriorPDF({
     });
   }
 
-  const endingDate = addDays(startDate, 364);
+  const endingDate = addDays(
+    startDate,
+    364
+  );
 
   titlePage.drawText(
     "365 consecutive daily pages",
@@ -619,7 +716,9 @@ async function createInteriorPDF({
   titlePage.drawText(
     `${formatDisplayDate(
       startDate
-    )} - ${formatDisplayDate(endingDate)}`,
+    )} - ${formatDisplayDate(
+      endingDate
+    )}`,
     {
       x: 44,
       y: 92,
@@ -630,13 +729,16 @@ async function createInteriorPDF({
   );
 
   if (ownerName) {
-    titlePage.drawText(ownerName.toUpperCase(), {
-      x: 44,
-      y: 60,
-      size: 8,
-      font: boldFont,
-      color: BLACK,
-    });
+    titlePage.drawText(
+      ownerName.toUpperCase(),
+      {
+        x: 44,
+        y: 60,
+        size: 8,
+        font: boldFont,
+        color: BLACK,
+      }
+    );
   }
 
   if (footerQuote) {
@@ -645,7 +747,8 @@ async function createInteriorPDF({
       text: footerQuote,
       x: INTERIOR_WIDTH / 2,
       y: 60,
-      maxWidth: INTERIOR_WIDTH / 2 - 44,
+      maxWidth:
+        INTERIOR_WIDTH / 2 - 44,
       font: italicFont,
       size: 7,
       lineHeight: 9,
@@ -660,24 +763,37 @@ async function createInteriorPDF({
   |--------------------------------------------------------------------------
   */
 
-  for (let dayIndex = 0; dayIndex < 365; dayIndex += 1) {
-    const page = pdfDocument.addPage([
-      INTERIOR_WIDTH,
-      INTERIOR_HEIGHT,
-    ]);
+  for (
+    let dayIndex = 0;
+    dayIndex < 365;
+    dayIndex += 1
+  ) {
+    const page =
+      pdfDocument.addPage([
+        INTERIOR_WIDTH,
+        INTERIOR_HEIGHT,
+      ]);
 
-    const currentDate = addDays(startDate, dayIndex);
-    const dayNumber = String(dayIndex + 1).padStart(
-      2,
-      "0"
+    const currentDate = addDays(
+      startDate,
+      dayIndex
     );
 
+    const dayNumber = String(
+      dayIndex + 1
+    ).padStart(2, "0");
+
     const marginX = 26;
+
     const contentWidth =
-      INTERIOR_WIDTH - marginX * 2;
+      INTERIOR_WIDTH -
+      marginX * 2;
+
     const columnGap = 18;
+
     const columnWidth =
-      (contentWidth - columnGap) / 2;
+      (contentWidth - columnGap) /
+      2;
 
     /*
     | Header
@@ -690,14 +806,17 @@ async function createInteriorPDF({
       color: accentColor,
     });
 
-    page.drawText(journalTitle.toUpperCase(), {
-      x: marginX + 10,
-      y: INTERIOR_HEIGHT - 31,
-      size: 10,
-      font: boldFont,
-      color: BLACK,
-      maxWidth: 210,
-    });
+    page.drawText(
+      journalTitle.toUpperCase(),
+      {
+        x: marginX + 10,
+        y: INTERIOR_HEIGHT - 31,
+        size: 10,
+        font: boldFont,
+        color: BLACK,
+        maxWidth: 210,
+      }
+    );
 
     if (initials) {
       page.drawLine({
@@ -722,11 +841,14 @@ async function createInteriorPDF({
       });
     }
 
-    const dateText = formatDate(currentDate);
-    const dateWidth = font.widthOfTextAtSize(
-      dateText,
-      8
-    );
+    const dateText =
+      formatDate(currentDate);
+
+    const dateWidth =
+      font.widthOfTextAtSize(
+        dateText,
+        8
+      );
 
     page.drawText(dateText, {
       x:
@@ -742,19 +864,32 @@ async function createInteriorPDF({
 
     page.drawLine({
       start: {
-        x: INTERIOR_WIDTH - marginX - 34,
-        y: INTERIOR_HEIGHT - 39,
+        x:
+          INTERIOR_WIDTH -
+          marginX -
+          34,
+        y:
+          INTERIOR_HEIGHT -
+          39,
       },
       end: {
-        x: INTERIOR_WIDTH - marginX - 34,
-        y: INTERIOR_HEIGHT - 19,
+        x:
+          INTERIOR_WIDTH -
+          marginX -
+          34,
+        y:
+          INTERIOR_HEIGHT -
+          19,
       },
       thickness: 0.7,
       color: LIGHT_GRAY,
     });
 
     page.drawText(dayNumber, {
-      x: INTERIOR_WIDTH - marginX - 25,
+      x:
+        INTERIOR_WIDTH -
+        marginX -
+        25,
       y: INTERIOR_HEIGHT - 31,
       size: 8,
       font,
@@ -764,26 +899,34 @@ async function createInteriorPDF({
     page.drawLine({
       start: {
         x: marginX,
-        y: INTERIOR_HEIGHT - 52,
+        y:
+          INTERIOR_HEIGHT -
+          52,
       },
       end: {
-        x: INTERIOR_WIDTH - marginX,
-        y: INTERIOR_HEIGHT - 52,
+        x:
+          INTERIOR_WIDTH -
+          marginX,
+        y:
+          INTERIOR_HEIGHT -
+          52,
       },
       thickness: 0.8,
       color: BLACK,
     });
 
     /*
-    | Daily feeling and daily intention
+    | Daily feeling and intention
     */
 
-    const upperSectionY = INTERIOR_HEIGHT - 79;
+    const upperSectionY =
+      INTERIOR_HEIGHT - 79;
 
     drawSectionLabel({
       page,
       label: "Daily Feeling",
-      prompt: dailyFeelingPrompt,
+      prompt:
+        dailyFeelingPrompt,
       x: marginX,
       y: upperSectionY,
       width: columnWidth,
@@ -795,8 +938,12 @@ async function createInteriorPDF({
     drawWritingLines({
       page,
       x: marginX + 165,
-      y: upperSectionY - 4,
-      width: columnWidth - 165,
+      y:
+        upperSectionY -
+        4,
+      width:
+        columnWidth -
+        165,
       count: 3,
       spacing: 14,
     });
@@ -804,23 +951,30 @@ async function createInteriorPDF({
     page.drawLine({
       start: {
         x: marginX + 155,
-        y: upperSectionY + 7,
+        y:
+          upperSectionY +
+          7,
       },
       end: {
         x: marginX + 155,
-        y: upperSectionY - 45,
+        y:
+          upperSectionY -
+          45,
       },
       thickness: 0.7,
       color: accentColor,
     });
 
     const rightColumnX =
-      marginX + columnWidth + columnGap;
+      marginX +
+      columnWidth +
+      columnGap;
 
     drawSectionLabel({
       page,
       label: "Daily Intention",
-      prompt: dailyIntentionPrompt,
+      prompt:
+        dailyIntentionPrompt,
       x: rightColumnX,
       y: upperSectionY,
       width: columnWidth,
@@ -831,21 +985,35 @@ async function createInteriorPDF({
 
     drawWritingLines({
       page,
-      x: rightColumnX + 165,
-      y: upperSectionY - 4,
-      width: columnWidth - 165,
+      x:
+        rightColumnX +
+        165,
+      y:
+        upperSectionY -
+        4,
+      width:
+        columnWidth -
+        165,
       count: 3,
       spacing: 14,
     });
 
     page.drawLine({
       start: {
-        x: rightColumnX + 155,
-        y: upperSectionY + 7,
+        x:
+          rightColumnX +
+          155,
+        y:
+          upperSectionY +
+          7,
       },
       end: {
-        x: rightColumnX + 155,
-        y: upperSectionY - 45,
+        x:
+          rightColumnX +
+          155,
+        y:
+          upperSectionY -
+          45,
       },
       thickness: 0.7,
       color: accentColor,
@@ -855,12 +1023,15 @@ async function createInteriorPDF({
     | Morning and evening reflection
     */
 
-    const reflectionY = INTERIOR_HEIGHT - 175;
+    const reflectionY =
+      INTERIOR_HEIGHT - 175;
 
     drawSectionLabel({
       page,
-      label: "Morning Reflection",
-      prompt: morningReflectionPrompt,
+      label:
+        "Morning Reflection",
+      prompt:
+        morningReflectionPrompt,
       x: marginX,
       y: reflectionY,
       width: columnWidth,
@@ -872,11 +1043,15 @@ async function createInteriorPDF({
     page.drawLine({
       start: {
         x: marginX + 155,
-        y: reflectionY + 7,
+        y:
+          reflectionY +
+          7,
       },
       end: {
         x: marginX + 155,
-        y: reflectionY - 142,
+        y:
+          reflectionY -
+          142,
       },
       thickness: 0.7,
       color: accentColor,
@@ -885,16 +1060,22 @@ async function createInteriorPDF({
     drawWritingLines({
       page,
       x: marginX + 168,
-      y: reflectionY - 3,
-      width: columnWidth - 168,
+      y:
+        reflectionY -
+        3,
+      width:
+        columnWidth -
+        168,
       count: 9,
       spacing: 16,
     });
 
     drawSectionLabel({
       page,
-      label: "Evening Reflection",
-      prompt: eveningReflectionPrompt,
+      label:
+        "Evening Reflection",
+      prompt:
+        eveningReflectionPrompt,
       x: rightColumnX,
       y: reflectionY,
       width: columnWidth,
@@ -905,12 +1086,20 @@ async function createInteriorPDF({
 
     page.drawLine({
       start: {
-        x: rightColumnX + 155,
-        y: reflectionY + 7,
+        x:
+          rightColumnX +
+          155,
+        y:
+          reflectionY +
+          7,
       },
       end: {
-        x: rightColumnX + 155,
-        y: reflectionY - 142,
+        x:
+          rightColumnX +
+          155,
+        y:
+          reflectionY -
+          142,
       },
       thickness: 0.7,
       color: accentColor,
@@ -918,9 +1107,15 @@ async function createInteriorPDF({
 
     drawWritingLines({
       page,
-      x: rightColumnX + 168,
-      y: reflectionY - 3,
-      width: columnWidth - 168,
+      x:
+        rightColumnX +
+        168,
+      y:
+        reflectionY -
+        3,
+      width:
+        columnWidth -
+        168,
       count: 9,
       spacing: 16,
     });
@@ -937,7 +1132,9 @@ async function createInteriorPDF({
         y: dividerY,
       },
       end: {
-        x: INTERIOR_WIDTH - marginX,
+        x:
+          INTERIOR_WIDTH -
+          marginX,
         y: dividerY,
       },
       thickness: 0.5,
@@ -946,16 +1143,22 @@ async function createInteriorPDF({
     });
 
     const bottomGap = 14;
+
     const bottomColumnWidth =
-      (contentWidth - bottomGap * 2) / 3;
+      (
+        contentWidth -
+        bottomGap * 2
+      ) / 3;
 
     drawSectionLabel({
       page,
-      label: "Care Question One",
+      label:
+        "Care Question One",
       prompt: careQuestionOne,
       x: marginX,
       y: 94,
-      width: bottomColumnWidth,
+      width:
+        bottomColumnWidth,
       accentColor,
       font,
       boldFont,
@@ -965,21 +1168,27 @@ async function createInteriorPDF({
       page,
       x: marginX + 10,
       y: 57,
-      width: bottomColumnWidth - 12,
+      width:
+        bottomColumnWidth -
+        12,
       count: 1,
       spacing: 12,
     });
 
     const bottomColumnTwoX =
-      marginX + bottomColumnWidth + bottomGap;
+      marginX +
+      bottomColumnWidth +
+      bottomGap;
 
     drawSectionLabel({
       page,
-      label: "Care Question Two",
+      label:
+        "Care Question Two",
       prompt: careQuestionTwo,
       x: bottomColumnTwoX,
       y: 94,
-      width: bottomColumnWidth,
+      width:
+        bottomColumnWidth,
       accentColor,
       font,
       boldFont,
@@ -987,9 +1196,13 @@ async function createInteriorPDF({
 
     drawWritingLines({
       page,
-      x: bottomColumnTwoX + 10,
+      x:
+        bottomColumnTwoX +
+        10,
       y: 57,
-      width: bottomColumnWidth - 12,
+      width:
+        bottomColumnWidth -
+        12,
       count: 1,
       spacing: 12,
     });
@@ -1003,9 +1216,11 @@ async function createInteriorPDF({
       page,
       label: "Body Notes",
       prompt: bodyNotesPrompt,
-      x: bottomColumnThreeX,
+      x:
+        bottomColumnThreeX,
       y: 94,
-      width: bottomColumnWidth,
+      width:
+        bottomColumnWidth,
       accentColor,
       font,
       boldFont,
@@ -1013,9 +1228,13 @@ async function createInteriorPDF({
 
     drawWritingLines({
       page,
-      x: bottomColumnThreeX + 10,
+      x:
+        bottomColumnThreeX +
+        10,
       y: 57,
-      width: bottomColumnWidth - 12,
+      width:
+        bottomColumnWidth -
+        12,
       count: 2,
       spacing: 14,
     });
@@ -1030,7 +1249,9 @@ async function createInteriorPDF({
         y: 30,
       },
       end: {
-        x: INTERIOR_WIDTH - marginX,
+        x:
+          INTERIOR_WIDTH -
+          marginX,
         y: 30,
       },
       thickness: 0.7,
@@ -1046,30 +1267,39 @@ async function createInteriorPDF({
 
     if (footerQuote) {
       const footerSize = 6;
+
       const footerWidth =
         italicFont.widthOfTextAtSize(
           footerQuote,
           footerSize
         );
 
-      page.drawText(footerQuote, {
-        x: Math.max(
-          marginX,
-          (INTERIOR_WIDTH - footerWidth) / 2
-        ),
-        y: 13,
-        size: footerSize,
-        font: italicFont,
-        color: GRAY,
-        maxWidth: contentWidth,
-      });
+      page.drawText(
+        footerQuote,
+        {
+          x: Math.max(
+            marginX,
+            (
+              INTERIOR_WIDTH -
+              footerWidth
+            ) / 2
+          ),
+          y: 13,
+          size: footerSize,
+          font: italicFont,
+          color: GRAY,
+          maxWidth:
+            contentWidth,
+        }
+      );
     }
   }
 
-  const pdfBytes = await pdfDocument.save({
-    useObjectStreams: true,
-    addDefaultPage: false,
-  });
+  const pdfBytes =
+    await pdfDocument.save({
+      useObjectStreams: true,
+      addDefaultPage: false,
+    });
 
   await fs.promises.writeFile(
     outputPath,
@@ -1087,24 +1317,29 @@ async function createCoverPDF({
   coverColor,
   accentColor,
 }) {
-  const pdfDocument = await PDFDocument.create();
+  const pdfDocument =
+    await PDFDocument.create();
 
-  const page = pdfDocument.addPage([
-    COVER_WIDTH,
-    COVER_HEIGHT,
-  ]);
+  const page =
+    pdfDocument.addPage([
+      COVER_WIDTH,
+      COVER_HEIGHT,
+    ]);
 
-  const font = await pdfDocument.embedFont(
-    StandardFonts.Helvetica
-  );
+  const font =
+    await pdfDocument.embedFont(
+      StandardFonts.Helvetica
+    );
 
-  const boldFont = await pdfDocument.embedFont(
-    StandardFonts.HelveticaBold
-  );
+  const boldFont =
+    await pdfDocument.embedFont(
+      StandardFonts.HelveticaBold
+    );
 
-  const italicFont = await pdfDocument.embedFont(
-    StandardFonts.HelveticaOblique
-  );
+  const italicFont =
+    await pdfDocument.embedFont(
+      StandardFonts.HelveticaOblique
+    );
 
   page.drawRectangle({
     x: 0,
@@ -1114,18 +1349,18 @@ async function createCoverPDF({
     color: coverColor,
   });
 
-  /*
-  | These measurements assume:
-  | back cover + spine + front cover.
-  | The exact spine width can be adjusted after Cloudprinter confirms it.
-  */
+  const spineWidth =
+    18.8 * MM_TO_POINTS;
 
-  const spineWidth = 18.8 * MM_TO_POINTS;
   const panelWidth =
-    (COVER_WIDTH - spineWidth) / 2;
+    (
+      COVER_WIDTH -
+      spineWidth
+    ) / 2;
 
   const frontCoverX =
-    panelWidth + spineWidth;
+    panelWidth +
+    spineWidth;
 
   page.drawLine({
     start: {
@@ -1143,11 +1378,15 @@ async function createCoverPDF({
 
   page.drawLine({
     start: {
-      x: panelWidth + spineWidth,
+      x:
+        panelWidth +
+        spineWidth,
       y: 0,
     },
     end: {
-      x: panelWidth + spineWidth,
+      x:
+        panelWidth +
+        spineWidth,
       y: COVER_HEIGHT,
     },
     thickness: 0.3,
@@ -1155,15 +1394,21 @@ async function createCoverPDF({
     opacity: 0.2,
   });
 
-  const frontMargin = 52 * MM_TO_POINTS;
+  const frontMargin =
+    52 * MM_TO_POINTS;
 
   drawWrappedText({
     page,
     text: journalTitle,
-    x: frontCoverX + frontMargin,
-    y: COVER_HEIGHT - 72 * MM_TO_POINTS,
+    x:
+      frontCoverX +
+      frontMargin,
+    y:
+      COVER_HEIGHT -
+      72 * MM_TO_POINTS,
     maxWidth:
-      panelWidth - frontMargin * 2,
+      panelWidth -
+      frontMargin * 2,
     font: boldFont,
     size: 29,
     lineHeight: 31,
@@ -1174,11 +1419,18 @@ async function createCoverPDF({
   if (subtitle) {
     drawWrappedText({
       page,
-      text: subtitle.toUpperCase(),
-      x: frontCoverX + frontMargin,
-      y: COVER_HEIGHT - 105 * MM_TO_POINTS,
+      text:
+        subtitle.toUpperCase(),
+      x:
+        frontCoverX +
+        frontMargin,
+      y:
+        COVER_HEIGHT -
+        105 *
+          MM_TO_POINTS,
       maxWidth:
-        panelWidth - frontMargin * 2,
+        panelWidth -
+        frontMargin * 2,
       font: boldFont,
       size: 9,
       lineHeight: 12,
@@ -1188,35 +1440,57 @@ async function createCoverPDF({
   }
 
   if (ownerName) {
-    page.drawText(ownerName.toUpperCase(), {
-      x: frontCoverX + frontMargin,
-      y: 30 * MM_TO_POINTS,
-      size: 8,
-      font: boldFont,
-      color: rgb(1, 1, 1),
-      maxWidth:
-        panelWidth - frontMargin * 2,
-    });
+    page.drawText(
+      ownerName.toUpperCase(),
+      {
+        x:
+          frontCoverX +
+          frontMargin,
+        y:
+          30 *
+          MM_TO_POINTS,
+        size: 8,
+        font: boldFont,
+        color: rgb(1, 1, 1),
+        maxWidth:
+          panelWidth -
+          frontMargin * 2,
+      }
+    );
   }
 
   if (initials) {
-    page.drawText(initials, {
-      x: frontCoverX + frontMargin,
-      y: COVER_HEIGHT - 38 * MM_TO_POINTS,
-      size: 15,
-      font: boldFont,
-      color: accentColor,
-    });
+    page.drawText(
+      initials,
+      {
+        x:
+          frontCoverX +
+          frontMargin,
+        y:
+          COVER_HEIGHT -
+          38 *
+            MM_TO_POINTS,
+        size: 15,
+        font: boldFont,
+        color: accentColor,
+      }
+    );
   }
 
   if (footerQuote) {
     drawWrappedText({
       page,
       text: footerQuote,
-      x: 35 * MM_TO_POINTS,
-      y: 30 * MM_TO_POINTS,
+      x:
+        35 *
+        MM_TO_POINTS,
+      y:
+        30 *
+        MM_TO_POINTS,
       maxWidth:
-        panelWidth - 70 * MM_TO_POINTS,
+        panelWidth -
+        70 *
+          MM_TO_POINTS,
       font: italicFont,
       size: 7,
       lineHeight: 10,
@@ -1225,13 +1499,12 @@ async function createCoverPDF({
     });
   }
 
-  /*
-  | Spine title
-  */
-
   const spineText =
     journalTitle.length > 45
-      ? journalTitle.slice(0, 45)
+      ? journalTitle.slice(
+          0,
+          45
+        )
       : journalTitle;
 
   const spineFontSize = 9;
@@ -1242,26 +1515,30 @@ async function createCoverPDF({
       spineFontSize
     );
 
-  page.drawText(spineText.toUpperCase(), {
-    x:
-      panelWidth +
-      spineWidth / 2 -
-      spineFontSize / 2,
-    y:
-      (COVER_HEIGHT - spineTextWidth) / 2,
-    size: spineFontSize,
-    font: boldFont,
-    color: rgb(1, 1, 1),
-    rotate: {
-      type: "degrees",
-      angle: 90,
-    },
-  });
+  page.drawText(
+    spineText.toUpperCase(),
+    {
+      x:
+        panelWidth +
+        spineWidth / 2 -
+        spineFontSize / 2,
+      y:
+        (
+          COVER_HEIGHT -
+          spineTextWidth
+        ) / 2,
+      size: spineFontSize,
+      font: boldFont,
+      color: rgb(1, 1, 1),
+      rotate: degrees(90),
+    }
+  );
 
-  const pdfBytes = await pdfDocument.save({
-    useObjectStreams: true,
-    addDefaultPage: false,
-  });
+  const pdfBytes =
+    await pdfDocument.save({
+      useObjectStreams: true,
+      addDefaultPage: false,
+    });
 
   await fs.promises.writeFile(
     outputPath,
