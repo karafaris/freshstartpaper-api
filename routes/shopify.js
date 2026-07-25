@@ -10,6 +10,10 @@ const {
   deleteGeneratedLocalFiles,
 } = require("../services/cloudinaryService");
 
+const {
+  saveOrderFiles,
+} = require("../services/orderFileStore");
+
 const router = express.Router();
 
 router.post(
@@ -46,12 +50,6 @@ router.post(
         });
       }
 
-      /*
-      |--------------------------------------------------------------------------
-      | Verify Shopify HMAC signature
-      |--------------------------------------------------------------------------
-      */
-
       const calculatedHmac = crypto
         .createHmac("sha256", webhookSecret)
         .update(req.body)
@@ -86,12 +84,6 @@ router.post(
         });
       }
 
-      /*
-      |--------------------------------------------------------------------------
-      | Parse verified Shopify order
-      |--------------------------------------------------------------------------
-      */
-
       let order;
 
       try {
@@ -110,6 +102,7 @@ router.post(
         });
       }
 
+      const orderId = order.id;
       const orderNumber =
         order.order_number ||
         order.id ||
@@ -122,7 +115,7 @@ router.post(
       console.log("===== ORDER =====");
 
       console.log({
-        id: order.id,
+        id: orderId,
         orderNumber,
         orderName: order.name,
         email: order.email,
@@ -133,16 +126,6 @@ router.post(
         createdAt: order.created_at,
       });
 
-      console.log("===== CUSTOMER =====");
-
-      console.log({
-        email: order.email,
-        firstName:
-          order.customer?.first_name,
-        lastName:
-          order.customer?.last_name,
-      });
-
       console.log("===== PRODUCTS =====");
 
       order.line_items?.forEach(
@@ -150,14 +133,10 @@ router.post(
           console.log(
             `Product ${index + 1}:`,
             {
+              lineItemId: item.id,
               title: item.title,
               variantTitle:
                 item.variant_title,
-              productId:
-                item.product_id,
-              variantId:
-                item.variant_id,
-              lineItemId: item.id,
               quantity: item.quantity,
               sku: item.sku,
               properties:
@@ -167,32 +146,29 @@ router.post(
         }
       );
 
-      /*
-      |--------------------------------------------------------------------------
-      | Respond to Shopify immediately
-      |--------------------------------------------------------------------------
-      | PDF generation and upload happen after Shopify receives 200 OK.
-      |--------------------------------------------------------------------------
-      */
-
       res.status(200).json({
         success: true,
         message:
           "Verified Shopify order accepted",
-        orderId: order.id,
+        orderId,
         orderNumber,
       });
-
-      /*
-      |--------------------------------------------------------------------------
-      | Generate and upload PDFs in the background
-      |--------------------------------------------------------------------------
-      */
 
       setImmediate(async () => {
         let generatedFiles;
 
         try {
+          const lineItem =
+            order.line_items?.[0];
+
+          if (!lineItem?.id) {
+            throw new Error(
+              "The order does not contain a valid line-item ID"
+            );
+          }
+
+          const itemId = lineItem.id;
+
           console.log(
             `Starting PDF generation for order ${orderNumber}`
           );
@@ -205,8 +181,9 @@ router.post(
           );
 
           console.log({
-            orderId: order.id,
+            orderId,
             orderNumber,
+            itemId,
             interiorPath:
               generatedFiles.interiorPath,
             coverPath:
@@ -223,7 +200,8 @@ router.post(
                 generatedFiles.interiorPath,
               coverPath:
                 generatedFiles.coverPath,
-              orderNumber,
+              orderId,
+              itemId,
             });
 
           console.log(
@@ -231,23 +209,37 @@ router.post(
           );
 
           console.log({
-            orderId: order.id,
-            orderNumber,
-            interiorUrl:
-              uploadedFiles.interior.secureUrl,
-            interiorPublicId:
-              uploadedFiles.interior.publicId,
+            productUrl:
+              uploadedFiles.interior.url,
+            productMd5:
+              uploadedFiles.interior.md5sum,
             coverUrl:
-              uploadedFiles.cover.secureUrl,
-            coverPublicId:
-              uploadedFiles.cover.publicId,
+              uploadedFiles.cover.url,
+            coverMd5:
+              uploadedFiles.cover.md5sum,
           });
 
-          /*
-          |--------------------------------------------------------------------------
-          | Remove temporary Render files after successful upload
-          |--------------------------------------------------------------------------
-          */
+          const storedFiles =
+            await saveOrderFiles({
+              orderId,
+              orderNumber,
+              itemId,
+              files: [
+                uploadedFiles.interior,
+                uploadedFiles.cover,
+              ],
+            });
+
+          console.log(
+            "===== FILE MANIFEST SAVED ====="
+          );
+
+          console.log({
+            orderId,
+            itemId,
+            manifestUrl:
+              storedFiles.manifestUrl,
+          });
 
           await deleteGeneratedLocalFiles({
             interiorPath:
@@ -265,16 +257,11 @@ router.post(
           );
 
           console.error({
-            orderId: order.id,
+            orderId,
             orderNumber,
             message: error.message,
             stack: error.stack,
           });
-
-          /*
-          | Local PDFs are intentionally kept if Cloudinary upload fails.
-          | This makes troubleshooting easier.
-          */
         }
       });
 

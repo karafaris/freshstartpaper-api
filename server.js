@@ -2,17 +2,20 @@ require("dotenv").config();
 
 const express = require("express");
 
-const shopifyRouter = require("./routes/shopify");
+const shopifyRouter =
+  require("./routes/shopify");
+
+const cloudprinterRouter =
+  require("./routes/cloudprinter");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 /*
 |--------------------------------------------------------------------------
-| Shopify routes
+| Shopify webhook
 |--------------------------------------------------------------------------
-| This must be mounted before express.json().
-| The Shopify route uses express.raw() for HMAC verification.
+| Must appear before express.json() because it requires the raw body.
 |--------------------------------------------------------------------------
 */
 
@@ -20,27 +23,22 @@ app.use("/shopify", shopifyRouter);
 
 /*
 |--------------------------------------------------------------------------
-| Regular JSON parsing
+| Standard JSON routes
 |--------------------------------------------------------------------------
 */
 
 app.use(express.json());
 
-/*
-|--------------------------------------------------------------------------
-| Home route
-|--------------------------------------------------------------------------
-*/
+app.use(
+  "/cloudprinter",
+  cloudprinterRouter
+);
 
 app.get("/", (req, res) => {
-  res.send("Fresh Start Paper API Running");
+  res.send(
+    "Fresh Start Paper API Running"
+  );
 });
-
-/*
-|--------------------------------------------------------------------------
-| Health-check route
-|--------------------------------------------------------------------------
-*/
 
 app.get("/health", (req, res) => {
   res.status(200).json({
@@ -50,14 +48,11 @@ app.get("/health", (req, res) => {
   });
 });
 
-/*
-|--------------------------------------------------------------------------
-| Error handler
-|--------------------------------------------------------------------------
-*/
-
 app.use((error, req, res, next) => {
-  console.error("Unhandled server error:", error);
+  console.error(
+    "Unhandled server error:",
+    error
+  );
 
   if (res.headersSent) {
     return next(error);
@@ -69,12 +64,8 @@ app.use((error, req, res, next) => {
   });
 });
 
-/*
-|--------------------------------------------------------------------------
-| Start server
-|--------------------------------------------------------------------------
-*/
-
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(
+    `Server running on port ${PORT}`
+  );
 });
