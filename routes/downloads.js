@@ -9,8 +9,20 @@ const router = express.Router();
 
 const SHOPIFY_API_VERSION = "2026-07";
 
+/*
+|--------------------------------------------------------------------------
+| Shopify access-token cache
+|--------------------------------------------------------------------------
+*/
+
 let cachedAccessToken = null;
 let cachedAccessTokenExpiresAt = 0;
+
+/*
+|--------------------------------------------------------------------------
+| Normalize Shopify store domain
+|--------------------------------------------------------------------------
+*/
 
 function normalizeShopifyStore(store) {
   return String(store || "")
@@ -18,6 +30,42 @@ function normalizeShopifyStore(store) {
     .replace(/^https?:\/\//i, "")
     .replace(/\/+$/, "");
 }
+
+/*
+|--------------------------------------------------------------------------
+| Extract numeric ID from Shopify GraphQL GID
+|--------------------------------------------------------------------------
+|
+| Example:
+| gid://shopify/LineItem/123456789
+|
+| Returns:
+| 123456789
+|--------------------------------------------------------------------------
+*/
+
+function extractNumericIdFromGid(gid) {
+  const value = String(gid || "").trim();
+
+  if (!value) {
+    return null;
+  }
+
+  const parts = value.split("/");
+  const numericId = parts[parts.length - 1];
+
+  if (!numericId || !/^\d+$/.test(numericId)) {
+    return null;
+  }
+
+  return numericId;
+}
+
+/*
+|--------------------------------------------------------------------------
+| Extract Shopify error message
+|--------------------------------------------------------------------------
+*/
 
 function getShopifyErrorDetails(error) {
   const status =
@@ -43,6 +91,12 @@ function getShopifyErrorDetails(error) {
     shopifyMessage,
   };
 }
+
+/*
+|--------------------------------------------------------------------------
+| Get Shopify Admin API access token
+|--------------------------------------------------------------------------
+*/
 
 async function getShopifyAccessToken() {
   const shopifyStore =
@@ -120,7 +174,8 @@ async function getShopifyAccessToken() {
 
   const expiresInSeconds =
     Number(
-      response.data?.expires_in || 86399
+      response.data?.expires_in ||
+      86399
     );
 
   if (!accessToken) {
@@ -139,8 +194,18 @@ async function getShopifyAccessToken() {
     ) *
       1000;
 
+  console.log(
+    "Shopify Admin API access token acquired."
+  );
+
   return cachedAccessToken;
 }
+
+/*
+|--------------------------------------------------------------------------
+| Find Shopify order
+|--------------------------------------------------------------------------
+*/
 
 async function findShopifyOrder(
   orderNumber
@@ -157,6 +222,14 @@ async function findShopifyOrder(
     `https://${shopifyStore}` +
     `/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
 
+  /*
+   * contactEmail was removed because it is not available on Order.
+   *
+   * legacyResourceId was removed from LineItem because Shopify does not
+   * expose that field on LineItem. We use the LineItem GraphQL ID and
+   * extract the numeric ID from the GID instead.
+   */
+
   const query = `
     query FindOrder($searchQuery: String!) {
       orders(
@@ -170,11 +243,12 @@ async function findShopifyOrder(
           legacyResourceId
           name
           email
-          contactEmail
+          customer {
+            email
+          }
           lineItems(first: 100) {
             nodes {
               id
-              legacyResourceId
               title
               quantity
             }
@@ -184,13 +258,20 @@ async function findShopifyOrder(
     }
   `;
 
+  const searchQuery =
+    `name:#${orderNumber}`;
+
+  console.log(
+    "Searching Shopify for:",
+    searchQuery
+  );
+
   const response = await axios.post(
     graphqlUrl,
     {
       query,
       variables: {
-        searchQuery:
-          `name:#${orderNumber}`,
+        searchQuery,
       },
     },
     {
@@ -209,20 +290,30 @@ async function findShopifyOrder(
     Array.isArray(response.data?.errors) &&
     response.data.errors.length > 0
   ) {
-    throw new Error(
+    const graphqlMessage =
       response.data.errors
         .map(
           (graphqlError) =>
             graphqlError.message
         )
-        .join("; ")
-    );
+        .join("; ");
+
+    throw new Error(graphqlMessage);
   }
 
   const orders =
     response.data?.data?.orders?.nodes;
 
   if (!Array.isArray(orders)) {
+    console.error(
+      "Shopify did not return an orders array:",
+      JSON.stringify(
+        response.data || {},
+        null,
+        2
+      )
+    );
+
     return null;
   }
 
@@ -238,10 +329,18 @@ async function findShopifyOrder(
           .replace(/^#/, "")
           .trim();
 
-      return orderName === requestedNumber;
+      return (
+        orderName === requestedNumber
+      );
     }) || null
   );
 }
+
+/*
+|--------------------------------------------------------------------------
+| GET /downloads
+|--------------------------------------------------------------------------
+*/
 
 router.get("/", (req, res) => {
   return res.status(200).json({
@@ -252,6 +351,12 @@ router.get("/", (req, res) => {
       new Date().toISOString(),
   });
 });
+
+/*
+|--------------------------------------------------------------------------
+| POST /downloads
+|--------------------------------------------------------------------------
+*/
 
 router.post("/", async (req, res) => {
   try {
@@ -278,6 +383,10 @@ router.post("/", async (req, res) => {
       });
     }
 
+    console.log(
+      `Looking up Shopify order #${orderNumber}`
+    );
+
     const order =
       await findShopifyOrder(
         orderNumber
@@ -293,14 +402,21 @@ router.post("/", async (req, res) => {
 
     const orderEmail = String(
       order.email ||
-      order.contactEmail ||
+      order.customer?.email ||
       ""
     )
       .trim()
       .toLowerCase();
 
+    if (!orderEmail) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "No customer email was found for this order.",
+      });
+    }
+
     if (
-      !orderEmail ||
       orderEmail !== submittedEmail
     ) {
       return res.status(403).json({
@@ -311,16 +427,19 @@ router.post("/", async (req, res) => {
     }
 
     const orderId =
-      order.legacyResourceId;
-
-    const lineItems =
-      order.lineItems?.nodes;
+      order.legacyResourceId ||
+      extractNumericIdFromGid(
+        order.id
+      );
 
     if (!orderId) {
       throw new Error(
-        "Shopify did not return the internal order ID."
+        "Shopify did not return a usable internal order ID."
       );
     }
+
+    const lineItems =
+      order.lineItems?.nodes;
 
     if (!Array.isArray(lineItems)) {
       throw new Error(
@@ -328,17 +447,32 @@ router.post("/", async (req, res) => {
       );
     }
 
+    console.log(
+      `Found order ${order.name} with ${lineItems.length} line item(s).`
+    );
+
     const downloads = [];
 
     for (const item of lineItems) {
       const itemId =
-        item.legacyResourceId;
+        extractNumericIdFromGid(
+          item.id
+        );
 
       if (!itemId) {
+        console.error(
+          "Unable to extract numeric line-item ID:",
+          item.id
+        );
+
         continue;
       }
 
       try {
+        console.log(
+          `Looking for manifest: order ${orderId}, item ${itemId}`
+        );
+
         const manifest =
           await getOrderFiles({
             orderId,
@@ -351,6 +485,10 @@ router.post("/", async (req, res) => {
             manifest.files
           )
         ) {
+          console.log(
+            `No manifest found for order ${orderId}, item ${itemId}`
+          );
+
           continue;
         }
 
@@ -369,6 +507,10 @@ router.post("/", async (req, res) => {
           ) || null;
 
         if (!journal && !cover) {
+          console.log(
+            `Manifest contains no journal or cover for item ${itemId}`
+          );
+
           continue;
         }
 
@@ -414,8 +556,11 @@ router.post("/", async (req, res) => {
       "Downloads request failed:",
       {
         status,
-        message: error.message,
+        message:
+          error.message,
         shopifyMessage,
+        stack:
+          error.stack,
       }
     );
 
@@ -424,7 +569,7 @@ router.post("/", async (req, res) => {
         success: false,
         message:
           shopifyMessage ||
-          "Shopify rejected the authentication request with status 400.",
+          "Shopify rejected the request with status 400.",
       });
     }
 
@@ -453,7 +598,8 @@ router.post("/", async (req, res) => {
     ) {
       return res.status(500).json({
         success: false,
-        message: error.message,
+        message:
+          error.message,
       });
     }
 
