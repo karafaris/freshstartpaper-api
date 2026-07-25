@@ -7,6 +7,30 @@ const {
 
 const router = express.Router();
 
+/*
+|--------------------------------------------------------------------------
+| GET /downloads
+|--------------------------------------------------------------------------
+| Used only to verify the route is deployed correctly.
+|--------------------------------------------------------------------------
+*/
+
+router.get("/", (req, res) => {
+  return res.status(200).json({
+    success: true,
+    message: "Downloads route is working.",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| POST /downloads
+|--------------------------------------------------------------------------
+| Finds a customer's downloadable journal files.
+|--------------------------------------------------------------------------
+*/
+
 router.post("/", async (req, res) => {
   try {
     const { orderNumber, email } = req.body;
@@ -68,12 +92,12 @@ router.post("/", async (req, res) => {
 
       const journal =
         manifest.files.find(
-          (f) => f.type === "product"
+          (file) => file.type === "product"
         );
 
       const cover =
         manifest.files.find(
-          (f) => f.type === "cover"
+          (file) => file.type === "cover"
         );
 
       downloads.push({
@@ -91,17 +115,17 @@ router.post("/", async (req, res) => {
       });
     }
 
-    return res.json({
+    return res.status(200).json({
       success: true,
       downloads,
     });
   } catch (error) {
+    console.error("Downloads route failed:");
     console.error(error);
 
     return res.status(500).json({
       success: false,
-      message:
-        "Unable to retrieve downloads.",
+      message: "Unable to retrieve downloads.",
     });
   }
 });

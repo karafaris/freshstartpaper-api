@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const express = require("express");
+const cors = require("cors");
 
 const shopifyRouter =
   require("./routes/shopify");
@@ -18,15 +19,34 @@ const PORT = process.env.PORT || 3000;
 |--------------------------------------------------------------------------
 | Shopify webhook
 |--------------------------------------------------------------------------
-| Must appear before express.json() because it requires the raw body.
-|--------------------------------------------------------------------------
 */
 
 app.use("/shopify", shopifyRouter);
 
 /*
 |--------------------------------------------------------------------------
-| Standard JSON routes
+| CORS
+|--------------------------------------------------------------------------
+*/
+
+app.use(
+  cors({
+    origin: [
+      "https://freshstartpaper.com",
+      "https://www.freshstartpaper.com",
+      "http://localhost:3000"
+    ],
+    methods: [
+      "GET",
+      "POST"
+    ],
+    credentials: false
+  })
+);
+
+/*
+|--------------------------------------------------------------------------
+| JSON
 |--------------------------------------------------------------------------
 */
 
@@ -50,19 +70,17 @@ app.use(
 
 /*
 |--------------------------------------------------------------------------
-| Root
+| Home
 |--------------------------------------------------------------------------
 */
 
 app.get("/", (req, res) => {
-  res.send(
-    "Fresh Start Paper API Running"
-  );
+  res.send("Fresh Start Paper API Running");
 });
 
 /*
 |--------------------------------------------------------------------------
-| Health Check
+| Health
 |--------------------------------------------------------------------------
 */
 
@@ -76,7 +94,7 @@ app.get("/health", (req, res) => {
 
 /*
 |--------------------------------------------------------------------------
-| 404 Handler
+| 404
 |--------------------------------------------------------------------------
 */
 
@@ -89,21 +107,18 @@ app.use((req, res) => {
 
 /*
 |--------------------------------------------------------------------------
-| Global Error Handler
+| Error Handler
 |--------------------------------------------------------------------------
 */
 
 app.use((error, req, res, next) => {
-  console.error(
-    "Unhandled server error:",
-    error
-  );
+  console.error(error);
 
   if (res.headersSent) {
     return next(error);
   }
 
-  return res.status(500).json({
+  res.status(500).json({
     success: false,
     message: "Internal server error",
   });
@@ -111,7 +126,7 @@ app.use((error, req, res, next) => {
 
 /*
 |--------------------------------------------------------------------------
-| Start Server
+| Start
 |--------------------------------------------------------------------------
 */
 
