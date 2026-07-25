@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 
 const {
   getOrderFiles,
@@ -10,22 +11,104 @@ function getBearerToken(req) {
   const authorizationHeader =
     req.get("Authorization") || "";
 
-  if (!authorizationHeader.startsWith("Bearer ")) {
+  const match = authorizationHeader.match(
+    /^Bearer\s+(.+)$/i
+  );
+
+  if (!match) {
     return null;
   }
 
-  return authorizationHeader
-    .slice("Bearer ".length)
-    .trim();
+  return match[1].trim();
 }
+
+function securelyCompareTokens(
+  receivedToken,
+  expectedToken
+) {
+  if (!receivedToken || !expectedToken) {
+    return false;
+  }
+
+  const receivedBuffer = Buffer.from(
+    String(receivedToken),
+    "utf8"
+  );
+
+  const expectedBuffer = Buffer.from(
+    String(expectedToken),
+    "utf8"
+  );
+
+  if (
+    receivedBuffer.length !==
+    expectedBuffer.length
+  ) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    receivedBuffer,
+    expectedBuffer
+  );
+}
+
+function normalizeFileTypes(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [
+    ...new Set(
+      value
+        .map((fileType) =>
+          String(fileType || "")
+            .trim()
+            .toLowerCase()
+        )
+        .filter(Boolean)
+    ),
+  ];
+}
+
+function normalizeManifestFiles(manifest) {
+  if (!manifest || !Array.isArray(manifest.files)) {
+    return [];
+  }
+
+  return manifest.files
+    .map((file) => ({
+      type: String(file?.type || "")
+        .trim()
+        .toLowerCase(),
+
+      url: String(file?.url || "").trim(),
+
+      md5sum: String(
+        file?.md5sum || ""
+      ).trim(),
+    }))
+    .filter(
+      (file) =>
+        file.type &&
+        file.url &&
+        file.md5sum
+    );
+}
+
+router.get("/health", (req, res) => {
+  return res.status(200).json({
+    success: true,
+    service: "cloudprinter-files",
+    status: "available",
+  });
+});
 
 router.post("/files", async (req, res) => {
   try {
-    const receivedToken =
-      getBearerToken(req);
-
     const expectedToken =
-      process.env.CLOUDPRINTER_SECURITY_TOKEN;
+      process.env
+        .CLOUDPRINTER_SECURITY_TOKEN;
 
     if (!expectedToken) {
       console.error(
@@ -35,14 +118,20 @@ router.post("/files", async (req, res) => {
       return res.status(500).json({
         success: false,
         message:
-          "Cloudprinter token is not configured",
+          "Cloudprinter authentication is not configured",
       });
     }
 
-    if (
-      !receivedToken ||
-      receivedToken !== expectedToken
-    ) {
+    const receivedToken =
+      getBearerToken(req);
+
+    const authorized =
+      securelyCompareTokens(
+        receivedToken,
+        expectedToken
+      );
+
+    if (!authorized) {
       console.error(
         "Unauthorized Cloudprinter request"
       );
@@ -53,23 +142,46 @@ router.post("/files", async (req, res) => {
       });
     }
 
-    const {
-      orderId,
-      itemId,
-      fileTypes,
-    } = req.body || {};
+    const body = req.body || {};
 
-    if (!orderId || !itemId) {
+    const orderId =
+      body.orderId ??
+      body.order_id;
+
+    const itemId =
+      body.itemId ??
+      body.item_id;
+
+    const requestedFileTypes =
+      normalizeFileTypes(
+        body.fileTypes ??
+          body.file_types
+      );
+
+    if (
+      orderId === undefined ||
+      orderId === null ||
+      String(orderId).trim() === ""
+    ) {
       return res.status(400).json({
         success: false,
-        message:
-          "orderId and itemId are required",
+        message: "orderId is required",
       });
     }
 
     if (
-      !Array.isArray(fileTypes) ||
-      fileTypes.length === 0
+      itemId === undefined ||
+      itemId === null ||
+      String(itemId).trim() === ""
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "itemId is required",
+      });
+    }
+
+    if (
+      requestedFileTypes.length === 0
     ) {
       return res.status(400).json({
         success: false,
@@ -78,26 +190,39 @@ router.post("/files", async (req, res) => {
       });
     }
 
+    const normalizedOrderId =
+      String(orderId).trim();
+
+    const normalizedItemId =
+      String(itemId).trim();
+
     console.log(
-      "Cloudprinter requested files",
-      {
-        orderId,
-        itemId,
-        fileTypes,
-      }
+      "===== CLOUDPRINTER FILE REQUEST ====="
     );
 
-    const manifest = await getOrderFiles({
-      orderId,
-      itemId,
+    console.log({
+      orderId: normalizedOrderId,
+      itemId: normalizedItemId,
+      fileTypes:
+        requestedFileTypes,
     });
+
+    const manifest =
+      await getOrderFiles({
+        orderId:
+          normalizedOrderId,
+        itemId:
+          normalizedItemId,
+      });
 
     if (!manifest) {
       console.error(
-        "No generated files found",
+        "No generated file manifest found",
         {
-          orderId,
-          itemId,
+          orderId:
+            normalizedOrderId,
+          itemId:
+            normalizedItemId,
         }
       );
 
@@ -108,28 +233,97 @@ router.post("/files", async (req, res) => {
       });
     }
 
-    const requestedFiles =
-      manifest.files.filter((file) =>
-        fileTypes.includes(file.type)
+    const availableFiles =
+      normalizeManifestFiles(
+        manifest
+      );
+
+    if (availableFiles.length === 0) {
+      console.error(
+        "Manifest does not contain valid files",
+        {
+          orderId:
+            normalizedOrderId,
+          itemId:
+            normalizedItemId,
+          manifest,
+        }
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "The stored file manifest is invalid",
+      });
+    }
+
+    const filesByType = new Map(
+      availableFiles.map((file) => [
+        file.type,
+        file,
+      ])
+    );
+
+    const missingFileTypes =
+      requestedFileTypes.filter(
+        (fileType) =>
+          !filesByType.has(fileType)
       );
 
     if (
-      requestedFiles.length !==
-      fileTypes.length
+      missingFileTypes.length > 0
     ) {
       const availableTypes =
-        manifest.files.map(
+        availableFiles.map(
           (file) => file.type
         );
+
+      console.error(
+        "Requested file types are unavailable",
+        {
+          orderId:
+            normalizedOrderId,
+          itemId:
+            normalizedItemId,
+          requestedFileTypes,
+          missingFileTypes,
+          availableTypes,
+        }
+      );
 
       return res.status(404).json({
         success: false,
         message:
           "One or more requested files are unavailable",
-        requestedTypes: fileTypes,
+        requestedTypes:
+          requestedFileTypes,
+        missingTypes:
+          missingFileTypes,
         availableTypes,
       });
     }
+
+    const requestedFiles =
+      requestedFileTypes.map(
+        (fileType) =>
+          filesByType.get(fileType)
+      );
+
+    console.log(
+      "===== CLOUDPRINTER FILES RETURNED ====="
+    );
+
+    console.log({
+      orderId: normalizedOrderId,
+      itemId: normalizedItemId,
+      files: requestedFiles.map(
+        (file) => ({
+          type: file.type,
+          url: file.url,
+          md5sum: file.md5sum,
+        })
+      ),
+    });
 
     return res.status(200).json({
       files: requestedFiles.map(
@@ -142,12 +336,13 @@ router.post("/files", async (req, res) => {
     });
   } catch (error) {
     console.error(
-      "Cloudprinter file request failed",
-      {
-        message: error.message,
-        stack: error.stack,
-      }
+      "Cloudprinter file request failed"
     );
+
+    console.error({
+      message: error.message,
+      stack: error.stack,
+    });
 
     return res.status(500).json({
       success: false,
