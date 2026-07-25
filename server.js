@@ -39,8 +39,29 @@ app.post(
     const order = JSON.parse(req.body.toString("utf8"));
 
     console.log("Verified Shopify order received");
-    console.log("Order ID:", order.id);
-    console.log("Order number:", order.order_number);
+console.log("Order ID:", order.id);
+console.log("Order number:", order.order_number);
+
+console.log("===== CUSTOMER =====");
+console.log({
+  email: order.email,
+  firstName: order.customer?.first_name,
+  lastName: order.customer?.last_name,
+});
+
+console.log("===== PRODUCTS =====");
+
+order.line_items?.forEach((item, index) => {
+  console.log(`Product ${index + 1}:`, {
+    title: item.title,
+    variantTitle: item.variant_title,
+    productId: item.product_id,
+    variantId: item.variant_id,
+    quantity: item.quantity,
+    sku: item.sku,
+    properties: item.properties,
+  });
+});
 
     return res.status(200).json({
       success: true,
