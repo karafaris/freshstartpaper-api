@@ -5,6 +5,11 @@ const {
   generateJournalPDFs,
 } = require("../services/pdfGenerator");
 
+const {
+  uploadGeneratedPDFs,
+  deleteGeneratedLocalFiles,
+} = require("../services/cloudinaryService");
+
 const router = express.Router();
 
 router.post(
@@ -41,6 +46,12 @@ router.post(
         });
       }
 
+      /*
+      |--------------------------------------------------------------------------
+      | Verify Shopify HMAC signature
+      |--------------------------------------------------------------------------
+      */
+
       const calculatedHmac = crypto
         .createHmac("sha256", webhookSecret)
         .update(req.body)
@@ -75,6 +86,12 @@ router.post(
         });
       }
 
+      /*
+      |--------------------------------------------------------------------------
+      | Parse verified Shopify order
+      |--------------------------------------------------------------------------
+      */
+
       let order;
 
       try {
@@ -93,6 +110,11 @@ router.post(
         });
       }
 
+      const orderNumber =
+        order.order_number ||
+        order.id ||
+        Date.now();
+
       console.log(
         "✅ Verified Shopify order received"
       );
@@ -101,11 +123,13 @@ router.post(
 
       console.log({
         id: order.id,
-        orderNumber: order.order_number,
+        orderNumber,
         orderName: order.name,
         email: order.email,
         financialStatus:
           order.financial_status,
+        fulfillmentStatus:
+          order.fulfillment_status,
         createdAt: order.created_at,
       });
 
@@ -133,6 +157,7 @@ router.post(
                 item.product_id,
               variantId:
                 item.variant_id,
+              lineItemId: item.id,
               quantity: item.quantity,
               sku: item.sku,
               properties:
@@ -142,51 +167,114 @@ router.post(
         }
       );
 
+      /*
+      |--------------------------------------------------------------------------
+      | Respond to Shopify immediately
+      |--------------------------------------------------------------------------
+      | PDF generation and upload happen after Shopify receives 200 OK.
+      |--------------------------------------------------------------------------
+      */
+
       res.status(200).json({
         success: true,
         message:
           "Verified Shopify order accepted",
         orderId: order.id,
-        orderNumber:
-          order.order_number,
+        orderNumber,
       });
 
+      /*
+      |--------------------------------------------------------------------------
+      | Generate and upload PDFs in the background
+      |--------------------------------------------------------------------------
+      */
+
       setImmediate(async () => {
+        let generatedFiles;
+
         try {
           console.log(
-            `Starting PDF generation for order ${
-              order.order_number ||
-              order.id
-            }`
+            `Starting PDF generation for order ${orderNumber}`
           );
 
-          const generatedFiles =
-            await generateJournalPDFs(
-              order
-            );
+          generatedFiles =
+            await generateJournalPDFs(order);
 
           console.log(
             "===== PDF GENERATION COMPLETE ====="
           );
 
           console.log({
+            orderId: order.id,
+            orderNumber,
             interiorPath:
               generatedFiles.interiorPath,
             coverPath:
               generatedFiles.coverPath,
           });
+
+          console.log(
+            `Starting Cloudinary upload for order ${orderNumber}`
+          );
+
+          const uploadedFiles =
+            await uploadGeneratedPDFs({
+              interiorPath:
+                generatedFiles.interiorPath,
+              coverPath:
+                generatedFiles.coverPath,
+              orderNumber,
+            });
+
+          console.log(
+            "===== CLOUDINARY UPLOAD COMPLETE ====="
+          );
+
+          console.log({
+            orderId: order.id,
+            orderNumber,
+            interiorUrl:
+              uploadedFiles.interior.secureUrl,
+            interiorPublicId:
+              uploadedFiles.interior.publicId,
+            coverUrl:
+              uploadedFiles.cover.secureUrl,
+            coverPublicId:
+              uploadedFiles.cover.publicId,
+          });
+
+          /*
+          |--------------------------------------------------------------------------
+          | Remove temporary Render files after successful upload
+          |--------------------------------------------------------------------------
+          */
+
+          await deleteGeneratedLocalFiles({
+            interiorPath:
+              generatedFiles.interiorPath,
+            coverPath:
+              generatedFiles.coverPath,
+          });
+
+          console.log(
+            `✅ Order ${orderNumber} processing complete`
+          );
         } catch (error) {
           console.error(
-            "Background PDF generation failed"
+            "Background order processing failed"
           );
 
           console.error({
             orderId: order.id,
-            orderNumber:
-              order.order_number,
+            orderNumber,
             message: error.message,
             stack: error.stack,
           });
+
+          /*
+          | Local PDFs are intentionally kept if Cloudinary upload fails.
+          | This makes troubleshooting easier.
+          */
         }
       });
 
@@ -208,6 +296,8 @@ router.post(
             "Order processing failed",
         });
       }
+
+      return;
     }
   }
 );
