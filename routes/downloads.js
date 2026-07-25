@@ -13,9 +13,6 @@ const SHOPIFY_API_VERSION = "2026-07";
 |--------------------------------------------------------------------------
 | Shopify access-token cache
 |--------------------------------------------------------------------------
-| Dev Dashboard client-credentials tokens expire after approximately
-| 24 hours. We cache the token and request a new one shortly before expiry.
-|--------------------------------------------------------------------------
 */
 
 let cachedAccessToken = null;
@@ -36,14 +33,78 @@ function normalizeShopifyStore(store) {
 
 /*
 |--------------------------------------------------------------------------
+| Log Axios errors clearly
+|--------------------------------------------------------------------------
+*/
+
+function logAxiosError(label, error) {
+  console.error("========================================");
+  console.error(label);
+  console.error("Message:", error.message);
+
+  if (error.config) {
+    console.error("Request method:", error.config.method);
+    console.error("Request URL:", error.config.url);
+  }
+
+  if (error.response) {
+    console.error("Response status:", error.response.status);
+    console.error(
+      "Response status text:",
+      error.response.statusText
+    );
+
+    console.error(
+      "Response headers:",
+      JSON.stringify(
+        error.response.headers || {},
+        null,
+        2
+      )
+    );
+
+    console.error("Response body:");
+
+    if (
+      typeof error.response.data ===
+      "string"
+    ) {
+      console.error(error.response.data);
+    } else {
+      console.error(
+        JSON.stringify(
+          error.response.data || {},
+          null,
+          2
+        )
+      );
+    }
+  } else if (error.request) {
+    console.error(
+      "Request was sent but no response was received."
+    );
+  } else {
+    console.error(
+      "Request could not be created."
+    );
+  }
+
+  console.error("Stack:");
+  console.error(error.stack);
+  console.error("========================================");
+}
+
+/*
+|--------------------------------------------------------------------------
 | Get Shopify Admin API access token
 |--------------------------------------------------------------------------
 */
 
 async function getShopifyAccessToken() {
-  const shopifyStore = normalizeShopifyStore(
-    process.env.SHOPIFY_STORE
-  );
+  const shopifyStore =
+    normalizeShopifyStore(
+      process.env.SHOPIFY_STORE
+    );
 
   const clientId = String(
     process.env.SHOPIFY_CLIENT_ID || ""
@@ -73,13 +134,10 @@ async function getShopifyAccessToken() {
 
   const now = Date.now();
 
-  /*
-   * Reuse the token while it remains valid.
-   * Refresh five minutes before Shopify says it expires.
-   */
   if (
     cachedAccessToken &&
-    cachedAccessTokenExpiresAt > now + 5 * 60 * 1000
+    cachedAccessTokenExpiresAt >
+      now + 5 * 60 * 1000
   ) {
     return cachedAccessToken;
   }
@@ -88,34 +146,85 @@ async function getShopifyAccessToken() {
     `https://${shopifyStore}` +
     "/admin/oauth/access_token";
 
-  const requestBody = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: clientId,
-    client_secret: clientSecret,
-  });
+  const requestBody =
+    new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: clientId,
+      client_secret: clientSecret,
+    });
 
   console.log(
     "Requesting Shopify Admin API access token"
   );
 
-  const response = await axios.post(
-    tokenUrl,
-    requestBody.toString(),
-    {
-      headers: {
-        "Content-Type":
-          "application/x-www-form-urlencoded",
-      },
-      timeout: 15000,
-    }
+  console.log(
+    "Shopify token URL:",
+    tokenUrl
   );
+
+  let response;
+
+  try {
+    response = await axios.post(
+      tokenUrl,
+      requestBody.toString(),
+      {
+        headers: {
+          "Content-Type":
+            "application/x-www-form-urlencoded",
+          Accept: "application/json",
+        },
+        timeout: 15000,
+        validateStatus: () => true,
+      }
+    );
+  } catch (error) {
+    logAxiosError(
+      "SHOPIFY TOKEN REQUEST FAILED",
+      error
+    );
+
+    throw error;
+  }
+
+  console.log(
+    "Shopify token response status:",
+    response.status
+  );
+
+  console.log(
+    "Shopify token response body:",
+    typeof response.data === "string"
+      ? response.data
+      : JSON.stringify(
+          response.data || {},
+          null,
+          2
+        )
+  );
+
+  if (
+    response.status < 200 ||
+    response.status >= 300
+  ) {
+    const tokenError =
+      new Error(
+        `Shopify token request failed with status ${response.status}.`
+      );
+
+    tokenError.response = response;
+
+    throw tokenError;
+  }
 
   const accessToken =
     response.data?.access_token;
 
-  const expiresInSeconds = Number(
-    response.data?.expires_in || 86399
-  );
+  const expiresInSeconds =
+    Number(
+      response.data?.expires_in ||
+        86399
+    );
 
   if (!accessToken) {
     throw new Error(
@@ -123,7 +232,8 @@ async function getShopifyAccessToken() {
     );
   }
 
-  cachedAccessToken = accessToken;
+  cachedAccessToken =
+    accessToken;
 
   cachedAccessTokenExpiresAt =
     Date.now() +
@@ -142,14 +252,17 @@ async function getShopifyAccessToken() {
 
 /*
 |--------------------------------------------------------------------------
-| Find a Shopify order
+| Find Shopify order
 |--------------------------------------------------------------------------
 */
 
-async function findShopifyOrder(orderNumber) {
-  const shopifyStore = normalizeShopifyStore(
-    process.env.SHOPIFY_STORE
-  );
+async function findShopifyOrder(
+  orderNumber
+) {
+  const shopifyStore =
+    normalizeShopifyStore(
+      process.env.SHOPIFY_STORE
+    );
 
   const accessToken =
     await getShopifyAccessToken();
@@ -188,40 +301,131 @@ async function findShopifyOrder(orderNumber) {
   const searchQuery =
     `name:#${orderNumber}`;
 
-  const response = await axios.post(
-    graphqlUrl,
-    {
-      query,
-      variables: {
-        searchQuery,
+  console.log(
+    "Searching Shopify order:",
+    searchQuery
+  );
+
+  let response;
+
+  try {
+    response = await axios.post(
+      graphqlUrl,
+      {
+        query,
+        variables: {
+          searchQuery,
+        },
       },
-    },
-    {
-      headers: {
-        "X-Shopify-Access-Token":
-          accessToken,
-        "Content-Type":
-          "application/json",
-      },
-      timeout: 15000,
-    }
+      {
+        headers: {
+          "X-Shopify-Access-Token":
+            accessToken,
+          "Content-Type":
+            "application/json",
+          Accept: "application/json",
+        },
+        timeout: 15000,
+        validateStatus: () => true,
+      }
+    );
+  } catch (error) {
+    logAxiosError(
+      "SHOPIFY GRAPHQL REQUEST FAILED",
+      error
+    );
+
+    throw error;
+  }
+
+  console.log(
+    "Shopify GraphQL response status:",
+    response.status
   );
 
   if (
-    Array.isArray(response.data?.errors) &&
+    response.status < 200 ||
+    response.status >= 300
+  ) {
+    console.error(
+      "Shopify GraphQL response body:",
+      typeof response.data === "string"
+        ? response.data
+        : JSON.stringify(
+            response.data || {},
+            null,
+            2
+          )
+    );
+
+    const graphqlHttpError =
+      new Error(
+        `Shopify GraphQL request failed with status ${response.status}.`
+      );
+
+    graphqlHttpError.response =
+      response;
+
+    throw graphqlHttpError;
+  }
+
+  if (
+    Array.isArray(
+      response.data?.errors
+    ) &&
     response.data.errors.length > 0
   ) {
+    console.error(
+      "Shopify GraphQL top-level errors:",
+      JSON.stringify(
+        response.data.errors,
+        null,
+        2
+      )
+    );
+
     throw new Error(
       response.data.errors
-        .map((error) => error.message)
+        .map(
+          (graphqlError) =>
+            graphqlError.message
+        )
         .join("; ")
     );
   }
 
+  const userErrors =
+    response.data?.data?.orders
+      ?.userErrors;
+
+  if (
+    Array.isArray(userErrors) &&
+    userErrors.length > 0
+  ) {
+    console.error(
+      "Shopify GraphQL user errors:",
+      JSON.stringify(
+        userErrors,
+        null,
+        2
+      )
+    );
+  }
+
   const orders =
-    response.data?.data?.orders?.nodes;
+    response.data?.data?.orders
+      ?.nodes;
 
   if (!Array.isArray(orders)) {
+    console.error(
+      "Shopify GraphQL returned no orders array:",
+      JSON.stringify(
+        response.data || {},
+        null,
+        2
+      )
+    );
+
     return null;
   }
 
@@ -249,8 +453,6 @@ async function findShopifyOrder(orderNumber) {
 |--------------------------------------------------------------------------
 | GET /downloads
 |--------------------------------------------------------------------------
-| Confirms that the route is deployed.
-|--------------------------------------------------------------------------
 */
 
 router.get("/", (req, res) => {
@@ -258,16 +460,14 @@ router.get("/", (req, res) => {
     success: true,
     message:
       "Downloads route is working.",
-    timestamp: new Date().toISOString(),
+    timestamp:
+      new Date().toISOString(),
   });
 });
 
 /*
 |--------------------------------------------------------------------------
 | POST /downloads
-|--------------------------------------------------------------------------
-| Verifies the customer's order number and email, then returns the
-| generated Cloudinary PDF files stored in the order manifest.
 |--------------------------------------------------------------------------
 */
 
@@ -285,12 +485,17 @@ router.post("/", async (req, res) => {
       .trim()
       .toLowerCase();
 
-    if (!orderNumber || !submittedEmail) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Order number and email are required.",
-      });
+    if (
+      !orderNumber ||
+      !submittedEmail
+    ) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message:
+            "Order number and email are required.",
+        });
     }
 
     console.log(
@@ -298,14 +503,18 @@ router.post("/", async (req, res) => {
     );
 
     const order =
-      await findShopifyOrder(orderNumber);
+      await findShopifyOrder(
+        orderNumber
+      );
 
     if (!order) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Order not found. Enter the Shopify order number, such as 1017.",
-      });
+      return res
+        .status(404)
+        .json({
+          success: false,
+          message:
+            "Order not found. Enter the Shopify order number, such as 1017.",
+        });
     }
 
     const orderEmail = String(
@@ -320,11 +529,13 @@ router.post("/", async (req, res) => {
       !orderEmail ||
       orderEmail !== submittedEmail
     ) {
-      return res.status(403).json({
-        success: false,
-        message:
-          "The order number and email address do not match.",
-      });
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message:
+            "The order number and email address do not match.",
+        });
     }
 
     const orderId =
@@ -368,7 +579,9 @@ router.post("/", async (req, res) => {
 
         if (
           !manifest ||
-          !Array.isArray(manifest.files)
+          !Array.isArray(
+            manifest.files
+          )
         ) {
           console.log(
             `No manifest found for order ${orderId}, item ${itemId}`
@@ -380,15 +593,19 @@ router.post("/", async (req, res) => {
         const journal =
           manifest.files.find(
             (file) =>
-              file.type === "product" ||
-              file.type === "journal" ||
-              file.type === "interior"
+              file.type ===
+                "product" ||
+              file.type ===
+                "journal" ||
+              file.type ===
+                "interior"
           ) || null;
 
         const cover =
           manifest.files.find(
             (file) =>
-              file.type === "cover"
+              file.type ===
+              "cover"
           ) || null;
 
         if (!journal && !cover) {
@@ -409,86 +626,112 @@ router.post("/", async (req, res) => {
           journal,
           cover,
         });
-      } catch (manifestError) {
+      } catch (
+        manifestError
+      ) {
         console.error(
           `Manifest lookup failed for item ${itemId}`
         );
 
-        console.error({
-          message:
-            manifestError.message,
-          stack:
-            manifestError.stack,
-        });
+        console.error(
+          "Manifest error message:",
+          manifestError.message
+        );
+
+        console.error(
+          "Manifest error stack:",
+          manifestError.stack
+        );
       }
     }
 
-    if (downloads.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Your journal files were not found or are still being generated.",
-      });
+    if (
+      downloads.length === 0
+    ) {
+      return res
+        .status(404)
+        .json({
+          success: false,
+          message:
+            "Your journal files were not found or are still being generated.",
+        });
     }
 
-    return res.status(200).json({
-      success: true,
-      orderNumber: order.name,
-      downloads,
-    });
+    return res
+      .status(200)
+      .json({
+        success: true,
+        orderNumber:
+          order.name,
+        downloads,
+      });
   } catch (error) {
-    const shopifyStatus =
-      error.response?.status;
-
-    const shopifyData =
-      error.response?.data;
-
-    console.error(
-      "Downloads route failed"
+    logAxiosError(
+      "DOWNLOADS ROUTE FAILED",
+      error
     );
 
-    console.error({
-      message: error.message,
-      status: shopifyStatus,
-      response: shopifyData,
-      stack: error.stack,
-    });
+    const shopifyStatus =
+      error.response?.status;
 
     if (
       shopifyStatus === 400 ||
       shopifyStatus === 401
     ) {
-      return res.status(500).json({
-        success: false,
-        message:
-          "Shopify authentication failed. Confirm that the app is installed and the Client ID and Client secret are correct.",
-      });
-    }
-
-    if (shopifyStatus === 403) {
-      return res.status(500).json({
-        success: false,
-        message:
-          "Shopify denied order access. Add the read_orders scope, release the app version, and reinstall or update the app.",
-      });
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            "Shopify authentication failed. Check the Render logs for the exact Shopify response.",
+        });
     }
 
     if (
-      error.message.includes(
+      shopifyStatus === 403
+    ) {
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            "Shopify denied order access. Check the Render logs for the exact Shopify response.",
+        });
+    }
+
+    if (
+      shopifyStatus === 404
+    ) {
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            "Shopify returned a 404 error. Check SHOPIFY_STORE and the Render logs.",
+        });
+    }
+
+    if (
+      String(error.message).includes(
         "SHOPIFY_"
       )
     ) {
-      return res.status(500).json({
-        success: false,
-        message: error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            error.message,
+        });
     }
 
-    return res.status(500).json({
-      success: false,
-      message:
-        "Unable to retrieve downloads.",
-    });
+    return res
+      .status(500)
+      .json({
+        success: false,
+        message:
+          "Unable to retrieve downloads. Check the Render logs for the exact error.",
+      });
   }
 });
 
