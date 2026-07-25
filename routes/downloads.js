@@ -63,7 +63,7 @@ function extractNumericIdFromGid(gid) {
 
 /*
 |--------------------------------------------------------------------------
-| Extract Shopify error message
+| Extract Shopify error details
 |--------------------------------------------------------------------------
 */
 
@@ -132,6 +132,10 @@ async function getShopifyAccessToken() {
 
   const now = Date.now();
 
+  /*
+   * Reuse the current access token while it remains valid.
+   * Request a replacement shortly before expiration.
+   */
   if (
     cachedAccessToken &&
     cachedAccessTokenExpiresAt >
@@ -223,11 +227,11 @@ async function findShopifyOrder(
     `/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
 
   /*
-   * contactEmail was removed because it is not available on Order.
+   * We intentionally query order.email directly.
    *
-   * legacyResourceId was removed from LineItem because Shopify does not
-   * expose that field on LineItem. We use the LineItem GraphQL ID and
-   * extract the numeric ID from the GID instead.
+   * Do not add customer { email } here. Accessing the Customer object
+   * requires the additional read_customers scope, which this app does
+   * not need for the download lookup.
    */
 
   const query = `
@@ -243,9 +247,6 @@ async function findShopifyOrder(
           legacyResourceId
           name
           email
-          customer {
-            email
-          }
           lineItems(first: 100) {
             nodes {
               id
@@ -401,9 +402,7 @@ router.post("/", async (req, res) => {
     }
 
     const orderEmail = String(
-      order.email ||
-      order.customer?.email ||
-      ""
+      order.email || ""
     )
       .trim()
       .toLowerCase();
@@ -412,7 +411,7 @@ router.post("/", async (req, res) => {
       return res.status(403).json({
         success: false,
         message:
-          "No customer email was found for this order.",
+          "No email address was found on this order.",
       });
     }
 
