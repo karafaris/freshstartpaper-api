@@ -1,4 +1,4 @@
-const express = require("express");
+\const express = require("express");
 const crypto = require("crypto");
 
 const {
@@ -14,7 +14,13 @@ const {
   saveOrderFiles,
 } = require("../services/orderFileStore");
 
+const {
+  submitCloudprinterOrder,
+} = require("../services/cloudprinterService");
+
 const router = express.Router();
+
+const JOURNAL_TOTAL_PAGES = 366;
 
 /**
  * Verify the Shopify webhook signature.
@@ -96,7 +102,8 @@ function isValidLineItem(lineItem) {
  * 1. Its own interior PDF
  * 2. Its own cover PDF
  * 3. Its own Cloudinary uploads
- * 4. Its own Cloudprinter file manifest
+ * 4. Its own stored file manifest
+ * 5. Its own Cloudprinter print-order submission
  */
 async function processLineItem({
   order,
@@ -111,7 +118,9 @@ async function processLineItem({
   let generatedFiles = null;
 
   console.log(
-    `Starting line item ${lineItemIndex + 1} of ${totalLineItems}`
+    `Starting line item ${
+      lineItemIndex + 1
+    } of ${totalLineItems}`
   );
 
   console.log({
@@ -119,12 +128,19 @@ async function processLineItem({
     orderNumber,
     itemId,
     title: lineItem.title,
-    variantTitle: lineItem.variant_title,
+    variantTitle:
+      lineItem.variant_title,
     sku: lineItem.sku,
     quantity: lineItem.quantity,
   });
 
   try {
+    /*
+    |--------------------------------------------------------------------------
+    | Generate PDFs
+    |--------------------------------------------------------------------------
+    */
+
     console.log(
       `Starting PDF generation for order ${orderNumber}, item ${itemId}`
     );
@@ -135,6 +151,15 @@ async function processLineItem({
         lineItem
       );
 
+    if (
+      !generatedFiles?.interiorPath ||
+      !generatedFiles?.coverPath
+    ) {
+      throw new Error(
+        `PDF generation did not return both files for item ${itemId}`
+      );
+    }
+
     console.log(
       "===== PDF GENERATION COMPLETE ====="
     );
@@ -143,11 +168,19 @@ async function processLineItem({
       orderId,
       orderNumber,
       itemId,
+      totalPages:
+        JOURNAL_TOTAL_PAGES,
       interiorPath:
         generatedFiles.interiorPath,
       coverPath:
         generatedFiles.coverPath,
     });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Upload PDFs to Cloudinary
+    |--------------------------------------------------------------------------
+    */
 
     console.log(
       `Starting Cloudinary upload for order ${orderNumber}, item ${itemId}`
@@ -172,6 +205,16 @@ async function processLineItem({
       );
     }
 
+    if (
+      !uploadedFiles?.interior
+        ?.md5sum ||
+      !uploadedFiles?.cover?.md5sum
+    ) {
+      throw new Error(
+        `Cloudinary file information does not include both MD5 checksums for item ${itemId}`
+      );
+    }
+
     console.log(
       "===== CLOUDINARY UPLOAD COMPLETE ====="
     );
@@ -180,15 +223,21 @@ async function processLineItem({
       orderId,
       orderNumber,
       itemId,
-      productUrl:
+      interiorUrl:
         uploadedFiles.interior.url,
-      productMd5:
+      interiorMd5:
         uploadedFiles.interior.md5sum,
       coverUrl:
         uploadedFiles.cover.url,
       coverMd5:
         uploadedFiles.cover.md5sum,
     });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Save the file manifest
+    |--------------------------------------------------------------------------
+    */
 
     const storedFiles =
       await saveOrderFiles({
@@ -201,6 +250,12 @@ async function processLineItem({
         ],
       });
 
+    if (!storedFiles?.manifestUrl) {
+      throw new Error(
+        `The file manifest was not saved correctly for item ${itemId}`
+      );
+    }
+
     console.log(
       "===== FILE MANIFEST SAVED ====="
     );
@@ -210,7 +265,52 @@ async function processLineItem({
       orderNumber,
       itemId,
       manifestUrl:
-        storedFiles?.manifestUrl,
+        storedFiles.manifestUrl,
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Submit the print order to Cloudprinter
+    |--------------------------------------------------------------------------
+    */
+
+    console.log(
+      `Starting Cloudprinter submission for order ${orderNumber}, item ${itemId}`
+    );
+
+    const cloudprinterResult =
+      await submitCloudprinterOrder({
+        order,
+        lineItem,
+        uploadedFiles,
+        totalPages:
+          JOURNAL_TOTAL_PAGES,
+      });
+
+    if (
+      !cloudprinterResult?.success
+    ) {
+      throw new Error(
+        `Cloudprinter did not confirm the order for item ${itemId}`
+      );
+    }
+
+    console.log(
+      "===== CLOUDPRINTER SUBMISSION COMPLETE ====="
+    );
+
+    console.log({
+      orderId,
+      orderNumber,
+      itemId,
+      cloudprinterOrderReference:
+        cloudprinterResult
+          .orderReference,
+      cloudprinterItemReference:
+        cloudprinterResult
+          .itemReference,
+      cloudprinterHttpStatus:
+        cloudprinterResult.status,
     });
 
     console.log(
@@ -222,8 +322,18 @@ async function processLineItem({
       itemId,
       title: lineItem.title,
       quantity: lineItem.quantity,
+      totalPages:
+        JOURNAL_TOTAL_PAGES,
       manifestUrl:
-        storedFiles?.manifestUrl,
+        storedFiles.manifestUrl,
+      cloudprinterOrderReference:
+        cloudprinterResult
+          .orderReference,
+      cloudprinterItemReference:
+        cloudprinterResult
+          .itemReference,
+      cloudprinterStatus:
+        cloudprinterResult.status,
     };
   } catch (error) {
     console.error(
@@ -247,6 +357,12 @@ async function processLineItem({
       error: error.message,
     };
   } finally {
+    /*
+    |--------------------------------------------------------------------------
+    | Delete temporary Render files
+    |--------------------------------------------------------------------------
+    */
+
     if (
       generatedFiles?.interiorPath ||
       generatedFiles?.coverPath
@@ -287,7 +403,9 @@ async function processLineItem({
  * Items are handled one at a time so Render does not attempt
  * to generate several 366-page PDF sets simultaneously.
  */
-async function processOrderInBackground(order) {
+async function processOrderInBackground(
+  order
+) {
   const orderId = order.id;
 
   const orderNumber =
@@ -295,18 +413,21 @@ async function processOrderInBackground(order) {
     order.id ||
     Date.now();
 
-  const allLineItems = Array.isArray(
-    order.line_items
-  )
-    ? order.line_items
-    : [];
+  const allLineItems =
+    Array.isArray(
+      order.line_items
+    )
+      ? order.line_items
+      : [];
 
   const validLineItems =
     allLineItems.filter(
       isValidLineItem
     );
 
-  if (validLineItems.length === 0) {
+  if (
+    validLineItems.length === 0
+  ) {
     throw new Error(
       "The Shopify order does not contain any valid line items"
     );
@@ -323,13 +444,16 @@ async function processOrderInBackground(order) {
       allLineItems.length,
     validLineItems:
       validLineItems.length,
+    financialStatus:
+      order.financial_status,
   });
 
   const results = [];
 
   for (
     let index = 0;
-    index < validLineItems.length;
+    index <
+    validLineItems.length;
     index += 1
   ) {
     const lineItem =
@@ -351,12 +475,14 @@ async function processOrderInBackground(order) {
 
   const successfulItems =
     results.filter(
-      (result) => result.success
+      (result) =>
+        result.success
     );
 
   const failedItems =
     results.filter(
-      (result) => !result.success
+      (result) =>
+        !result.success
     );
 
   console.log(
@@ -366,8 +492,7 @@ async function processOrderInBackground(order) {
   console.log({
     orderId,
     orderNumber,
-    totalItems:
-      results.length,
+    totalItems: results.length,
     successfulItems:
       successfulItems.length,
     failedItems:
@@ -375,7 +500,9 @@ async function processOrderInBackground(order) {
     results,
   });
 
-  if (failedItems.length > 0) {
+  if (
+    failedItems.length > 0
+  ) {
     console.error(
       `Order ${orderNumber} completed with ${failedItems.length} failed line item(s)`
     );
@@ -386,7 +513,7 @@ async function processOrderInBackground(order) {
     results.length
   ) {
     console.log(
-      `✅ Order ${orderNumber} processing complete`
+      `✅ Order ${orderNumber} processing and Cloudprinter submission complete`
     );
   } else if (
     successfulItems.length > 0
@@ -408,9 +535,10 @@ router.post(
   }),
   async (req, res) => {
     try {
-      const shopifyHmac = req.get(
-        "X-Shopify-Hmac-Sha256"
-      );
+      const shopifyHmac =
+        req.get(
+          "X-Shopify-Hmac-Sha256"
+        );
 
       const webhookSecret =
         process.env
@@ -421,10 +549,13 @@ router.post(
           "Missing Shopify webhook HMAC header"
         );
 
-        return res.status(401).json({
-          success: false,
-          message: "Unauthorized",
-        });
+        return res
+          .status(401)
+          .json({
+            success: false,
+            message:
+              "Unauthorized",
+          });
       }
 
       if (!webhookSecret) {
@@ -432,23 +563,31 @@ router.post(
           "SHOPIFY_WEBHOOK_SECRET is not configured"
         );
 
-        return res.status(500).json({
-          success: false,
-          message:
-            "Webhook configuration error",
-        });
+        return res
+          .status(500)
+          .json({
+            success: false,
+            message:
+              "Webhook configuration error",
+          });
       }
 
-      if (!Buffer.isBuffer(req.body)) {
+      if (
+        !Buffer.isBuffer(
+          req.body
+        )
+      ) {
         console.error(
           "Shopify webhook body is not a raw Buffer"
         );
 
-        return res.status(400).json({
-          success: false,
-          message:
-            "Invalid webhook body",
-        });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message:
+              "Invalid webhook body",
+          });
       }
 
       const isValid =
@@ -464,10 +603,13 @@ router.post(
           "Invalid Shopify webhook signature"
         );
 
-        return res.status(401).json({
-          success: false,
-          message: "Unauthorized",
-        });
+        return res
+          .status(401)
+          .json({
+            success: false,
+            message:
+              "Unauthorized",
+          });
       }
 
       let order;
@@ -484,14 +626,18 @@ router.post(
         );
 
         console.error({
-          message: error.message,
+          message:
+            error.message,
           stack: error.stack,
         });
 
-        return res.status(400).json({
-          success: false,
-          message: "Invalid JSON",
-        });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message:
+              "Invalid JSON",
+          });
       }
 
       if (!order?.id) {
@@ -499,14 +645,17 @@ router.post(
           "Shopify webhook does not contain an order ID"
         );
 
-        return res.status(400).json({
-          success: false,
-          message:
-            "Invalid Shopify order",
-        });
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message:
+              "Invalid Shopify order",
+          });
       }
 
-      const orderId = order.id;
+      const orderId =
+        order.id;
 
       const orderNumber =
         order.order_number ||
@@ -531,8 +680,10 @@ router.post(
       console.log({
         id: orderId,
         orderNumber,
-        orderName: order.name,
-        email: order.email,
+        orderName:
+          order.name,
+        email:
+          order.email,
         financialStatus:
           order.financial_status,
         fulfillmentStatus:
@@ -550,7 +701,9 @@ router.post(
       lineItems.forEach(
         (item, index) => {
           console.log(
-            `Product ${index + 1}:`,
+            `Product ${
+              index + 1
+            }:`,
             {
               lineItemId:
                 item.id,
@@ -564,8 +717,7 @@ router.post(
                 item.variant_title,
               quantity:
                 item.quantity,
-              sku:
-                item.sku,
+              sku: item.sku,
               properties:
                 item.properties,
             }
@@ -576,9 +728,8 @@ router.post(
       /*
        * Shopify needs a fast response.
        *
-       * Respond before generating PDFs because generating 365
-       * daily pages can take longer than Shopify's webhook
-       * timeout.
+       * Respond before generating PDFs because generating
+       * hundreds of pages may exceed Shopify's webhook timeout.
        */
       res.status(200).json({
         success: true,
@@ -596,20 +747,22 @@ router.post(
       setImmediate(() => {
         processOrderInBackground(
           order
-        ).catch((error) => {
-          console.error(
-            "Background order processing failed"
-          );
+        ).catch(
+          (error) => {
+            console.error(
+              "Background order processing failed"
+            );
 
-          console.error({
-            orderId,
-            orderNumber,
-            message:
-              error.message,
-            stack:
-              error.stack,
-          });
-        });
+            console.error({
+              orderId,
+              orderNumber,
+              message:
+                error.message,
+              stack:
+                error.stack,
+            });
+          }
+        );
       });
 
       return;
@@ -619,11 +772,14 @@ router.post(
       );
 
       console.error({
-        message: error.message,
+        message:
+          error.message,
         stack: error.stack,
       });
 
-      if (!res.headersSent) {
+      if (
+        !res.headersSent
+      ) {
         return res
           .status(500)
           .json({
