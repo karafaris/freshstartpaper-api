@@ -1,3 +1,6 @@
 node_modules
 .env
 generated-pdfs
+calendar-test-output.pdf
+calendar-error.txt
+generated/
