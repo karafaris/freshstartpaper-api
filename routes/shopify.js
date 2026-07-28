@@ -1,14 +1,23 @@
 const express = require("express");
 const crypto = require("crypto");
+const fs = require("fs");
 
 const {
   generateJournalPDFs,
 } = require("../services/pdfGenerator");
 
 const {
+  generateCalendarPDFs,
+} = require("../services/calendarPdfGenerator");
+
+const {
   uploadGeneratedPDFs,
   deleteGeneratedLocalFiles,
 } = require("../services/cloudinaryService");
+
+const {
+  uploadCalendarPdf,
+} = require("../services/calendarCloudinaryService");
 
 const {
   saveOrderFiles,
@@ -21,14 +30,21 @@ const {
 const router = express.Router();
 
 const JOURNAL_TOTAL_PAGES = 366;
+const CALENDAR_TOTAL_PAGES = 13;
+const CALENDAR_SKU = "CUSTOM-CALENDAR";
 
-/**
- * Verify the Shopify webhook signature.
- *
- * Shopify signs the exact raw request body using the webhook
- * secret. The body must remain a Buffer until verification
- * is complete.
- */
+function clean(value) {
+  return String(value ?? "").trim();
+}
+
+function normalizeSku(value) {
+  return clean(value).toUpperCase();
+}
+
+function isCalendarLineItem(lineItem) {
+  return normalizeSku(lineItem?.sku) === CALENDAR_SKU;
+}
+
 function verifyShopifyWebhook({
   rawBody,
   receivedHmac,
@@ -51,15 +67,8 @@ function verifyShopifyWebhook({
   let calculatedBuffer;
 
   try {
-    receivedBuffer = Buffer.from(
-      receivedHmac,
-      "base64"
-    );
-
-    calculatedBuffer = Buffer.from(
-      calculatedHmac,
-      "base64"
-    );
+    receivedBuffer = Buffer.from(receivedHmac, "base64");
+    calculatedBuffer = Buffer.from(calculatedHmac, "base64");
   } catch (error) {
     console.error(
       "Unable to convert Shopify HMAC values to buffers",
@@ -82,10 +91,6 @@ function verifyShopifyWebhook({
   );
 }
 
-/**
- * Return true when the line item has enough information
- * to generate personalized journal files.
- */
 function isValidLineItem(lineItem) {
   return Boolean(
     lineItem &&
@@ -94,56 +99,226 @@ function isValidLineItem(lineItem) {
   );
 }
 
-/**
- * Process one Shopify line item.
- *
- * Each line item gets:
- *
- * 1. Its own interior PDF
- * 2. Its own cover PDF
- * 3. Its own Cloudinary uploads
- * 4. Its own stored file manifest
- * 5. Its own Cloudprinter print-order submission
- */
-async function processLineItem({
+async function deleteLocalFile(filePath) {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    await fs.promises.unlink(filePath);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+async function processCalendarLineItem({
   order,
   orderId,
   orderNumber,
   lineItem,
-  lineItemIndex,
-  totalLineItems,
 }) {
   const itemId = lineItem.id;
-
   let generatedFiles = null;
 
-  console.log(
-    `Starting line item ${
-      lineItemIndex + 1
-    } of ${totalLineItems}`
-  );
-
-  console.log({
-    orderId,
-    orderNumber,
-    itemId,
-    title: lineItem.title,
-    variantTitle:
-      lineItem.variant_title,
-    sku: lineItem.sku,
-    quantity: lineItem.quantity,
-  });
-
   try {
-    /*
-    |--------------------------------------------------------------------------
-    | Generate PDFs
-    |--------------------------------------------------------------------------
-    */
+    console.log(
+      "===== HARD CALENDAR ROUTE SELECTED ====="
+    );
+
+    console.log({
+      orderId,
+      orderNumber,
+      itemId,
+      sku: lineItem.sku,
+      productKind: "calendar",
+    });
+
+    generatedFiles =
+      await generateCalendarPDFs(
+        order,
+        lineItem
+      );
+
+    if (!generatedFiles?.productPath) {
+      throw new Error(
+        `Calendar generator did not return productPath for item ${itemId}`
+      );
+    }
+
+    if (
+      Number(generatedFiles.totalPages) !==
+      CALENDAR_TOTAL_PAGES
+    ) {
+      throw new Error(
+        `Calendar generated ${generatedFiles.totalPages} pages instead of ${CALENDAR_TOTAL_PAGES}`
+      );
+    }
+
+    if (
+      generatedFiles.interiorPath ||
+      generatedFiles.coverPath
+    ) {
+      throw new Error(
+        "Calendar generator returned journal files. Calendar processing stopped."
+      );
+    }
 
     console.log(
-      `Starting PDF generation for order ${orderNumber}, item ${itemId}`
+      "===== CALENDAR PDF GENERATED ====="
     );
+
+    console.log({
+      orderId,
+      orderNumber,
+      itemId,
+      productPath:
+        generatedFiles.productPath,
+      totalPages:
+        generatedFiles.totalPages,
+      dimensions:
+        generatedFiles.dimensions,
+    });
+
+    const uploadedProduct =
+      await uploadCalendarPdf({
+        filePath:
+          generatedFiles.productPath,
+        orderId,
+        itemId,
+      });
+
+    if (
+      !uploadedProduct?.url ||
+      !uploadedProduct?.md5sum
+    ) {
+      throw new Error(
+        `Calendar upload did not return a URL and MD5 checksum for item ${itemId}`
+      );
+    }
+
+    console.log(
+      "===== CALENDAR FILE UPLOADED ====="
+    );
+
+    console.log({
+      orderId,
+      orderNumber,
+      itemId,
+      fileType:
+        uploadedProduct.type,
+      calendarUrl:
+        uploadedProduct.url,
+      publicId:
+        uploadedProduct.publicId,
+    });
+
+    const storedFiles =
+      await saveOrderFiles({
+        orderId,
+        orderNumber,
+        itemId,
+        productKind:
+          "calendar",
+        files: [
+          uploadedProduct,
+        ],
+      });
+
+    if (!storedFiles?.manifestUrl) {
+      throw new Error(
+        `Calendar manifest was not saved for item ${itemId}`
+      );
+    }
+
+    const cloudprinterResult =
+      await submitCloudprinterOrder({
+        order,
+        lineItem,
+        uploadedFiles: {
+          product:
+            uploadedProduct,
+        },
+        totalPages:
+          CALENDAR_TOTAL_PAGES,
+        productKind:
+          "calendar",
+      });
+
+    if (!cloudprinterResult?.success) {
+      throw new Error(
+        `Cloudprinter did not confirm the calendar order for item ${itemId}`
+      );
+    }
+
+    console.log(
+      "===== CALENDAR CLOUDPRINTER ORDER COMPLETE ====="
+    );
+
+    console.log({
+      orderId,
+      orderNumber,
+      itemId,
+      productKind:
+        "calendar",
+      productReference:
+        cloudprinterResult.productReference,
+      orderReference:
+        cloudprinterResult.orderReference,
+      status:
+        cloudprinterResult.status,
+    });
+
+    return {
+      success: true,
+      productKind:
+        "calendar",
+      itemId,
+      totalPages:
+        CALENDAR_TOTAL_PAGES,
+      manifestUrl:
+        storedFiles.manifestUrl,
+      cloudprinterOrderReference:
+        cloudprinterResult.orderReference,
+    };
+  } finally {
+    if (generatedFiles?.productPath) {
+      try {
+        await deleteLocalFile(
+          generatedFiles.productPath
+        );
+      } catch (cleanupError) {
+        console.error(
+          "Unable to delete calendar temporary file",
+          cleanupError
+        );
+      }
+    }
+  }
+}
+
+async function processJournalLineItem({
+  order,
+  orderId,
+  orderNumber,
+  lineItem,
+}) {
+  const itemId = lineItem.id;
+  let generatedFiles = null;
+
+  try {
+    console.log(
+      "===== JOURNAL ROUTE SELECTED ====="
+    );
+
+    console.log({
+      orderId,
+      orderNumber,
+      itemId,
+      sku: lineItem.sku,
+      productKind: "journal",
+    });
 
     generatedFiles =
       await generateJournalPDFs(
@@ -156,35 +331,9 @@ async function processLineItem({
       !generatedFiles?.coverPath
     ) {
       throw new Error(
-        `PDF generation did not return both files for item ${itemId}`
+        `Journal generator did not return interior and cover for item ${itemId}`
       );
     }
-
-    console.log(
-      "===== PDF GENERATION COMPLETE ====="
-    );
-
-    console.log({
-      orderId,
-      orderNumber,
-      itemId,
-      totalPages:
-        JOURNAL_TOTAL_PAGES,
-      interiorPath:
-        generatedFiles.interiorPath,
-      coverPath:
-        generatedFiles.coverPath,
-    });
-
-    /*
-    |--------------------------------------------------------------------------
-    | Upload PDFs to Cloudinary
-    |--------------------------------------------------------------------------
-    */
-
-    console.log(
-      `Starting Cloudinary upload for order ${orderNumber}, item ${itemId}`
-    );
 
     const uploadedFiles =
       await uploadGeneratedPDFs({
@@ -201,49 +350,17 @@ async function processLineItem({
       !uploadedFiles?.cover?.url
     ) {
       throw new Error(
-        `Cloudinary did not return complete file information for item ${itemId}`
+        `Journal upload did not return both files for item ${itemId}`
       );
     }
-
-    if (
-      !uploadedFiles?.interior
-        ?.md5sum ||
-      !uploadedFiles?.cover?.md5sum
-    ) {
-      throw new Error(
-        `Cloudinary file information does not include both MD5 checksums for item ${itemId}`
-      );
-    }
-
-    console.log(
-      "===== CLOUDINARY UPLOAD COMPLETE ====="
-    );
-
-    console.log({
-      orderId,
-      orderNumber,
-      itemId,
-      interiorUrl:
-        uploadedFiles.interior.url,
-      interiorMd5:
-        uploadedFiles.interior.md5sum,
-      coverUrl:
-        uploadedFiles.cover.url,
-      coverMd5:
-        uploadedFiles.cover.md5sum,
-    });
-
-    /*
-    |--------------------------------------------------------------------------
-    | Save the file manifest
-    |--------------------------------------------------------------------------
-    */
 
     const storedFiles =
       await saveOrderFiles({
         orderId,
         orderNumber,
         itemId,
+        productKind:
+          "journal",
         files: [
           uploadedFiles.interior,
           uploadedFiles.cover,
@@ -252,31 +369,9 @@ async function processLineItem({
 
     if (!storedFiles?.manifestUrl) {
       throw new Error(
-        `The file manifest was not saved correctly for item ${itemId}`
+        `Journal manifest was not saved for item ${itemId}`
       );
     }
-
-    console.log(
-      "===== FILE MANIFEST SAVED ====="
-    );
-
-    console.log({
-      orderId,
-      orderNumber,
-      itemId,
-      manifestUrl:
-        storedFiles.manifestUrl,
-    });
-
-    /*
-    |--------------------------------------------------------------------------
-    | Submit the print order to Cloudprinter
-    |--------------------------------------------------------------------------
-    */
-
-    console.log(
-      `Starting Cloudprinter submission for order ${orderNumber}, item ${itemId}`
-    );
 
     const cloudprinterResult =
       await submitCloudprinterOrder({
@@ -285,84 +380,33 @@ async function processLineItem({
         uploadedFiles,
         totalPages:
           JOURNAL_TOTAL_PAGES,
+        productKind:
+          "journal",
       });
 
-    if (
-      !cloudprinterResult?.success
-    ) {
+    if (!cloudprinterResult?.success) {
       throw new Error(
-        `Cloudprinter did not confirm the order for item ${itemId}`
+        `Cloudprinter did not confirm the journal order for item ${itemId}`
       );
     }
 
     console.log(
-      "===== CLOUDPRINTER SUBMISSION COMPLETE ====="
-    );
-
-    console.log({
-      orderId,
-      orderNumber,
-      itemId,
-      cloudprinterOrderReference:
-        cloudprinterResult
-          .orderReference,
-      cloudprinterItemReference:
-        cloudprinterResult
-          .itemReference,
-      cloudprinterHttpStatus:
-        cloudprinterResult.status,
-    });
-
-    console.log(
-      `✅ Item ${itemId} processing complete`
+      "===== JOURNAL CLOUDPRINTER ORDER COMPLETE ====="
     );
 
     return {
       success: true,
+      productKind:
+        "journal",
       itemId,
-      title: lineItem.title,
-      quantity: lineItem.quantity,
       totalPages:
         JOURNAL_TOTAL_PAGES,
       manifestUrl:
         storedFiles.manifestUrl,
       cloudprinterOrderReference:
-        cloudprinterResult
-          .orderReference,
-      cloudprinterItemReference:
-        cloudprinterResult
-          .itemReference,
-      cloudprinterStatus:
-        cloudprinterResult.status,
-    };
-  } catch (error) {
-    console.error(
-      `Processing failed for line item ${itemId}`
-    );
-
-    console.error({
-      orderId,
-      orderNumber,
-      itemId,
-      title: lineItem.title,
-      message: error.message,
-      stack: error.stack,
-    });
-
-    return {
-      success: false,
-      itemId,
-      title: lineItem.title,
-      quantity: lineItem.quantity,
-      error: error.message,
+        cloudprinterResult.orderReference,
     };
   } finally {
-    /*
-    |--------------------------------------------------------------------------
-    | Delete temporary Render files
-    |--------------------------------------------------------------------------
-    */
-
     if (
       generatedFiles?.interiorPath ||
       generatedFiles?.coverPath
@@ -374,35 +418,88 @@ async function processLineItem({
           coverPath:
             generatedFiles.coverPath,
         });
-
-        console.log(
-          `Temporary files deleted for item ${itemId}`
-        );
       } catch (cleanupError) {
         console.error(
-          `Unable to delete temporary files for item ${itemId}`
+          "Unable to delete journal temporary files",
+          cleanupError
         );
-
-        console.error({
-          orderId,
-          orderNumber,
-          itemId,
-          message:
-            cleanupError.message,
-          stack:
-            cleanupError.stack,
-        });
       }
     }
   }
 }
 
-/**
- * Process every valid line item in the order.
- *
- * Items are handled one at a time so Render does not attempt
- * to generate several 366-page PDF sets simultaneously.
- */
+async function processLineItem({
+  order,
+  orderId,
+  orderNumber,
+  lineItem,
+  lineItemIndex,
+  totalLineItems,
+}) {
+  const itemId = lineItem.id;
+  const sku = normalizeSku(
+    lineItem.sku
+  );
+
+  console.log(
+    `Starting line item ${
+      lineItemIndex + 1
+    } of ${totalLineItems}`
+  );
+
+  console.log({
+    orderId,
+    orderNumber,
+    itemId,
+    title:
+      lineItem.title,
+    sku,
+    quantity:
+      lineItem.quantity,
+  });
+
+  try {
+    if (sku === CALENDAR_SKU) {
+      return await processCalendarLineItem({
+        order,
+        orderId,
+        orderNumber,
+        lineItem,
+      });
+    }
+
+    return await processJournalLineItem({
+      order,
+      orderId,
+      orderNumber,
+      lineItem,
+    });
+  } catch (error) {
+    console.error(
+      `Processing failed for line item ${itemId}`
+    );
+
+    console.error({
+      orderId,
+      orderNumber,
+      itemId,
+      sku,
+      message:
+        error.message,
+      stack:
+        error.stack,
+    });
+
+    return {
+      success: false,
+      itemId,
+      sku,
+      error:
+        error.message,
+    };
+  }
+}
+
 async function processOrderInBackground(
   order
 ) {
@@ -414,9 +511,7 @@ async function processOrderInBackground(
     Date.now();
 
   const allLineItems =
-    Array.isArray(
-      order.line_items
-    )
+    Array.isArray(order.line_items)
       ? order.line_items
       : [];
 
@@ -425,65 +520,34 @@ async function processOrderInBackground(
       isValidLineItem
     );
 
-  if (
-    validLineItems.length === 0
-  ) {
+  if (validLineItems.length === 0) {
     throw new Error(
-      "The Shopify order does not contain any valid line items"
+      "The Shopify order does not contain valid line items"
     );
   }
-
-  console.log(
-    "===== BACKGROUND ORDER PROCESSING STARTED ====="
-  );
-
-  console.log({
-    orderId,
-    orderNumber,
-    totalLineItems:
-      allLineItems.length,
-    validLineItems:
-      validLineItems.length,
-    financialStatus:
-      order.financial_status,
-  });
 
   const results = [];
 
   for (
     let index = 0;
-    index <
-    validLineItems.length;
+    index < validLineItems.length;
     index += 1
   ) {
-    const lineItem =
-      validLineItems[index];
-
     const result =
       await processLineItem({
         order,
         orderId,
         orderNumber,
-        lineItem,
-        lineItemIndex: index,
+        lineItem:
+          validLineItems[index],
+        lineItemIndex:
+          index,
         totalLineItems:
           validLineItems.length,
       });
 
     results.push(result);
   }
-
-  const successfulItems =
-    results.filter(
-      (result) =>
-        result.success
-    );
-
-  const failedItems =
-    results.filter(
-      (result) =>
-        !result.success
-    );
 
   console.log(
     "===== ORDER PROCESSING SUMMARY ====="
@@ -492,40 +556,8 @@ async function processOrderInBackground(
   console.log({
     orderId,
     orderNumber,
-    totalItems: results.length,
-    successfulItems:
-      successfulItems.length,
-    failedItems:
-      failedItems.length,
     results,
   });
-
-  if (
-    failedItems.length > 0
-  ) {
-    console.error(
-      `Order ${orderNumber} completed with ${failedItems.length} failed line item(s)`
-    );
-  }
-
-  if (
-    successfulItems.length ===
-    results.length
-  ) {
-    console.log(
-      `✅ Order ${orderNumber} processing and Cloudprinter submission complete`
-    );
-  } else if (
-    successfulItems.length > 0
-  ) {
-    console.log(
-      `⚠️ Order ${orderNumber} partially completed`
-    );
-  } else {
-    console.error(
-      `❌ Order ${orderNumber} failed completely`
-    );
-  }
 }
 
 router.post(
@@ -544,11 +576,10 @@ router.post(
         process.env
           .SHOPIFY_WEBHOOK_SECRET;
 
-      if (!shopifyHmac) {
-        console.error(
-          "Missing Shopify webhook HMAC header"
-        );
-
+      if (
+        !shopifyHmac ||
+        !webhookSecret
+      ) {
         return res
           .status(401)
           .json({
@@ -558,29 +589,7 @@ router.post(
           });
       }
 
-      if (!webhookSecret) {
-        console.error(
-          "SHOPIFY_WEBHOOK_SECRET is not configured"
-        );
-
-        return res
-          .status(500)
-          .json({
-            success: false,
-            message:
-              "Webhook configuration error",
-          });
-      }
-
-      if (
-        !Buffer.isBuffer(
-          req.body
-        )
-      ) {
-        console.error(
-          "Shopify webhook body is not a raw Buffer"
-        );
-
+      if (!Buffer.isBuffer(req.body)) {
         return res
           .status(400)
           .json({
@@ -592,17 +601,14 @@ router.post(
 
       const isValid =
         verifyShopifyWebhook({
-          rawBody: req.body,
+          rawBody:
+            req.body,
           receivedHmac:
             shopifyHmac,
           webhookSecret,
         });
 
       if (!isValid) {
-        console.error(
-          "Invalid Shopify webhook signature"
-        );
-
         return res
           .status(401)
           .json({
@@ -616,21 +622,9 @@ router.post(
 
       try {
         order = JSON.parse(
-          req.body.toString(
-            "utf8"
-          )
+          req.body.toString("utf8")
         );
       } catch (error) {
-        console.error(
-          "Unable to parse Shopify webhook JSON"
-        );
-
-        console.error({
-          message:
-            error.message,
-          stack: error.stack,
-        });
-
         return res
           .status(400)
           .json({
@@ -641,10 +635,6 @@ router.post(
       }
 
       if (!order?.id) {
-        console.error(
-          "Shopify webhook does not contain an order ID"
-        );
-
         return res
           .status(400)
           .json({
@@ -654,132 +644,63 @@ router.post(
           });
       }
 
-      const orderId =
-        order.id;
-
-      const orderNumber =
-        order.order_number ||
-        order.id ||
-        Date.now();
-
       const lineItems =
-        Array.isArray(
-          order.line_items
-        )
+        Array.isArray(order.line_items)
           ? order.line_items
           : [];
 
       console.log(
-        "✅ Verified Shopify order received"
-      );
-
-      console.log(
-        "===== ORDER ====="
-      );
-
-      console.log({
-        id: orderId,
-        orderNumber,
-        orderName:
-          order.name,
-        email:
-          order.email,
-        financialStatus:
-          order.financial_status,
-        fulfillmentStatus:
-          order.fulfillment_status,
-        createdAt:
-          order.created_at,
-        lineItemCount:
-          lineItems.length,
-      });
-
-      console.log(
-        "===== PRODUCTS ====="
+        "===== SHOPIFY ORDER RECEIVED ====="
       );
 
       lineItems.forEach(
         (item, index) => {
-          console.log(
-            `Product ${
-              index + 1
-            }:`,
-            {
-              lineItemId:
-                item.id,
-              productId:
-                item.product_id,
-              variantId:
-                item.variant_id,
-              title:
-                item.title,
-              variantTitle:
-                item.variant_title,
-              quantity:
-                item.quantity,
-              sku: item.sku,
-              properties:
-                item.properties,
-            }
-          );
+          console.log({
+            index:
+              index + 1,
+            itemId:
+              item.id,
+            title:
+              item.title,
+            sku:
+              item.sku,
+            normalizedSku:
+              normalizeSku(item.sku),
+            isCalendar:
+              isCalendarLineItem(item),
+          });
         }
       );
 
-      /*
-       * Shopify needs a fast response.
-       *
-       * Respond before generating PDFs because generating
-       * hundreds of pages may exceed Shopify's webhook timeout.
-       */
       res.status(200).json({
         success: true,
         message:
           "Verified Shopify order accepted",
-        orderId,
-        orderNumber,
+        orderId:
+          order.id,
         lineItemCount:
           lineItems.length,
       });
 
-      /*
-       * Continue processing after Shopify receives its response.
-       */
       setImmediate(() => {
         processOrderInBackground(
           order
-        ).catch(
-          (error) => {
-            console.error(
-              "Background order processing failed"
-            );
-
-            console.error({
-              orderId,
-              orderNumber,
-              message:
-                error.message,
-              stack:
-                error.stack,
-            });
-          }
-        );
+        ).catch((error) => {
+          console.error(
+            "Background order processing failed",
+            error
+          );
+        });
       });
 
       return;
     } catch (error) {
       console.error(
-        "Shopify webhook processing failed"
+        "Shopify webhook processing failed",
+        error
       );
 
-      console.error({
-        message:
-          error.message,
-        stack: error.stack,
-      });
-
-      if (
-        !res.headersSent
-      ) {
+      if (!res.headersSent) {
         return res
           .status(500)
           .json({
