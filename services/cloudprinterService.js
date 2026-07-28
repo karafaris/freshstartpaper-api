@@ -3,22 +3,36 @@ const axios = require("axios");
 const CLOUDPRINTER_ORDERS_ADD_URL =
   "https://api.cloudprinter.com/cloudcore/1.0/orders/add";
 
-const DEFAULT_PRODUCT_REFERENCE =
+const DEFAULT_JOURNAL_PRODUCT_REFERENCE =
   "textbook_pb_1025x6630_l_fc_ink";
 
-const DEFAULT_SHIPPING_LEVEL =
-  "cp_postal";
+const DEFAULT_JOURNAL_SHIPPING_LEVEL =
+  "cp_ground";
 
-const DEFAULT_MAIN_PAPER =
+const DEFAULT_JOURNAL_MAIN_PAPER =
   "pageblock_80off";
 
-const DEFAULT_COVER_PAPER =
+const DEFAULT_JOURNAL_COVER_PAPER =
   "cover_250ecb";
 
-const DEFAULT_COVER_FINISH =
+const DEFAULT_JOURNAL_COVER_FINISH =
   "cover_finish_gloss";
 
-const DEFAULT_TOTAL_PAGES = 366;
+const DEFAULT_JOURNAL_TOTAL_PAGES = 366;
+
+const DEFAULT_CALENDAR_PRODUCT_REFERENCE =
+  "calendar_wall_int_a5_l_double_fc_tnr";
+
+const DEFAULT_CALENDAR_SHIPPING_LEVEL =
+  "cp_ground";
+
+const DEFAULT_CALENDAR_TOTAL_PAGES = 13;
+
+const DEFAULT_CALENDAR_PAPER =
+  "paper_170mcg";
+
+const DEFAULT_CALENDAR_PAGE_OPTION =
+  "calendar_13_pages";
 
 /**
  * Return a required environment variable.
@@ -52,7 +66,7 @@ function getEnvironmentVariable(
 }
 
 /**
- * Convert an unknown value to a clean string.
+ * Convert an unknown value into a clean string.
  */
 function cleanString(
   value,
@@ -71,8 +85,22 @@ function cleanString(
 }
 
 /**
- * Prevent Cloudprinter references from containing unsupported
- * characters.
+ * Return the first non-empty value.
+ */
+function firstAvailable(...values) {
+  for (const value of values) {
+    const cleaned = cleanString(value);
+
+    if (cleaned) {
+      return cleaned;
+    }
+  }
+
+  return "";
+}
+
+/**
+ * Create safe Cloudprinter references.
  */
 function sanitizeReference(
   value,
@@ -90,24 +118,7 @@ function sanitizeReference(
 }
 
 /**
- * Return the first available non-empty value.
- */
-function firstAvailable(...values) {
-  for (const value of values) {
-    const cleaned = cleanString(value);
-
-    if (cleaned) {
-      return cleaned;
-    }
-  }
-
-  return "";
-}
-
-/**
- * Shopify may provide country_code or the full country name.
- *
- * Cloudprinter requires an ISO 3166-1 alpha-2 country code.
+ * Convert Shopify country data to an ISO country code.
  */
 function normalizeCountryCode(address) {
   const directCountryCode =
@@ -157,8 +168,7 @@ function normalizeCountryCode(address) {
 }
 
 /**
- * Cloudprinter requires a two-character state code for US and
- * Canadian addresses.
+ * Normalize a state or province code.
  */
 function normalizeStateCode(address) {
   const stateCode =
@@ -178,7 +188,7 @@ function normalizeStateCode(address) {
 }
 
 /**
- * Get the delivery address from the Shopify order.
+ * Return the Shopify delivery address.
  */
 function getShopifyDeliveryAddress(order) {
   return (
@@ -189,7 +199,7 @@ function getShopifyDeliveryAddress(order) {
 }
 
 /**
- * Build the Cloudprinter delivery-address object.
+ * Build Cloudprinter's delivery-address object.
  */
 function buildDeliveryAddress(order) {
   const sourceAddress =
@@ -345,7 +355,7 @@ function buildDeliveryAddress(order) {
 }
 
 /**
- * Validate and normalize one uploaded PDF.
+ * Validate and normalize one uploaded file.
  */
 function normalizeUploadedFile({
   file,
@@ -399,12 +409,13 @@ function normalizeUploadedFile({
 }
 
 /**
- * Build the list of PDF files Cloudprinter will download.
+ * Build journal files.
  *
- * Cloudprinter calls the interior file "book". Your existing
- * Cloudinary service calls it "product", so it is converted here.
+ * Cloudprinter expects:
+ * - book
+ * - cover
  */
-function buildCloudprinterFiles(
+function buildJournalFiles(
   uploadedFiles
 ) {
   return [
@@ -425,10 +436,29 @@ function buildCloudprinterFiles(
 }
 
 /**
- * Build the options enabled for the selected Cloudprinter
- * textbook product.
+ * Build calendar files.
+ *
+ * Cloudprinter expects one PDF:
+ * - product
  */
-function buildCloudprinterOptions(
+function buildCalendarFiles(
+  uploadedFiles
+) {
+  return [
+    normalizeUploadedFile({
+      file:
+        uploadedFiles?.product,
+      expectedType: "calendar product",
+      cloudprinterType:
+        "product",
+    }),
+  ];
+}
+
+/**
+ * Build the existing journal options.
+ */
+function buildJournalOptions(
   totalPages
 ) {
   const normalizedTotalPages =
@@ -441,26 +471,26 @@ function buildCloudprinterOptions(
     normalizedTotalPages <= 0
   ) {
     throw new Error(
-      "Cloudprinter totalPages must be a positive whole number"
+      "Journal totalPages must be a positive whole number"
     );
   }
 
   const mainPaper =
     getEnvironmentVariable(
       "CLOUDPRINTER_MAIN_PAPER",
-      DEFAULT_MAIN_PAPER
+      DEFAULT_JOURNAL_MAIN_PAPER
     );
 
   const coverPaper =
     getEnvironmentVariable(
       "CLOUDPRINTER_COVER_PAPER",
-      DEFAULT_COVER_PAPER
+      DEFAULT_JOURNAL_COVER_PAPER
     );
 
   const coverFinish =
     getEnvironmentVariable(
       "CLOUDPRINTER_COVER_FINISH",
-      DEFAULT_COVER_FINISH
+      DEFAULT_JOURNAL_COVER_FINISH
     );
 
   return [
@@ -488,55 +518,193 @@ function buildCloudprinterOptions(
 }
 
 /**
- * Generate a unique Cloudprinter order reference.
+ * Build the confirmed calendar options.
  *
- * Cloudprinter requires each order reference to be unique.
+ * Confirmed from Cloudprinter product information:
+ * - paper_170mcg
+ * - calendar_13_pages
+ */
+function buildCalendarOptions() {
+  const calendarPaper =
+    getEnvironmentVariable(
+      "CLOUDPRINTER_CALENDAR_PAPER",
+      DEFAULT_CALENDAR_PAPER
+    );
+
+  const calendarPageOption =
+    getEnvironmentVariable(
+      "CLOUDPRINTER_CALENDAR_PAGE_OPTION",
+      DEFAULT_CALENDAR_PAGE_OPTION
+    );
+
+  return [
+    {
+      type: calendarPaper,
+      count: "1",
+    },
+    {
+      type: calendarPageOption,
+      count: "1",
+    },
+  ];
+}
+
+/**
+ * Create a unique Cloudprinter order reference.
  */
 function buildCloudprinterOrderReference({
   orderId,
   orderNumber,
   itemId,
+  productKind,
 }) {
   const baseReference =
     sanitizeReference(
-      `fsp-${orderNumber}-${orderId}-${itemId}`,
-      `fsp-${Date.now()}`
+      `fsp-${productKind}-${orderNumber}-${orderId}-${itemId}`,
+      `fsp-${productKind}-${Date.now()}`
     );
 
-  /*
-   * Add a short timestamp suffix so a Shopify webhook replay
-   * does not accidentally reuse an already submitted reference.
-   */
   const timestampSuffix =
     Date.now().toString(36);
 
   return sanitizeReference(
     `${baseReference}-${timestampSuffix}`,
-    `fsp-${Date.now()}`
+    `fsp-${productKind}-${Date.now()}`
   );
 }
 
 /**
- * Build a unique item reference inside the Cloudprinter order.
+ * Create a unique Cloudprinter item reference.
  */
 function buildCloudprinterItemReference({
   orderId,
   itemId,
+  productKind,
 }) {
   return sanitizeReference(
-    `fsp-item-${orderId}-${itemId}`,
-    `fsp-item-${Date.now()}`
+    `fsp-${productKind}-item-${orderId}-${itemId}`,
+    `fsp-${productKind}-item-${Date.now()}`
   );
 }
 
 /**
- * Create the Cloudprinter request body.
+ * Normalize the requested product kind.
+ */
+function normalizeProductKind(
+  productKind
+) {
+  return cleanString(
+    productKind,
+    "journal"
+  ).toLowerCase() ===
+    "calendar"
+    ? "calendar"
+    : "journal";
+}
+
+/**
+ * Return the Cloudprinter configuration for a product.
+ */
+function getCloudprinterProductConfiguration({
+  productKind,
+  totalPages,
+}) {
+  const normalizedKind =
+    normalizeProductKind(
+      productKind
+    );
+
+  if (
+    normalizedKind ===
+    "calendar"
+  ) {
+    const normalizedPages =
+      Number(
+        totalPages ||
+          DEFAULT_CALENDAR_TOTAL_PAGES
+      );
+
+    if (
+      normalizedPages !==
+      DEFAULT_CALENDAR_TOTAL_PAGES
+    ) {
+      throw new Error(
+        `The selected calendar product requires exactly ${DEFAULT_CALENDAR_TOTAL_PAGES} pages`
+      );
+    }
+
+    return {
+      productKind:
+        "calendar",
+
+      productReference:
+        getEnvironmentVariable(
+          "CLOUDPRINTER_CALENDAR_PRODUCT_REFERENCE",
+          DEFAULT_CALENDAR_PRODUCT_REFERENCE
+        ),
+
+      shippingLevel:
+        getEnvironmentVariable(
+          "CLOUDPRINTER_CALENDAR_SHIPPING_LEVEL",
+          DEFAULT_CALENDAR_SHIPPING_LEVEL
+        ),
+
+      totalPages:
+        DEFAULT_CALENDAR_TOTAL_PAGES,
+
+      filesBuilder:
+        buildCalendarFiles,
+
+      optionsBuilder:
+        buildCalendarOptions,
+    };
+  }
+
+  const normalizedPages =
+    Number(
+      totalPages ||
+        DEFAULT_JOURNAL_TOTAL_PAGES
+    );
+
+  return {
+    productKind:
+      "journal",
+
+    productReference:
+      getEnvironmentVariable(
+        "CLOUDPRINTER_PRODUCT_REFERENCE",
+        DEFAULT_JOURNAL_PRODUCT_REFERENCE
+      ),
+
+    shippingLevel:
+      getEnvironmentVariable(
+        "CLOUDPRINTER_SHIPPING_LEVEL",
+        DEFAULT_JOURNAL_SHIPPING_LEVEL
+      ),
+
+    totalPages:
+      normalizedPages,
+
+    filesBuilder:
+      buildJournalFiles,
+
+    optionsBuilder: () =>
+      buildJournalOptions(
+        normalizedPages
+      ),
+  };
+}
+
+/**
+ * Build the complete Cloudprinter payload.
  */
 function buildCloudprinterOrderPayload({
   order,
   lineItem,
   uploadedFiles,
-  totalPages = DEFAULT_TOTAL_PAGES,
+  totalPages =
+    DEFAULT_JOURNAL_TOTAL_PAGES,
+  productKind = "journal",
 }) {
   if (!order?.id) {
     throw new Error(
@@ -569,19 +737,14 @@ function buildCloudprinterOrderPayload({
     );
   }
 
-  const productReference =
-    getEnvironmentVariable(
-      "CLOUDPRINTER_PRODUCT_REFERENCE",
-      DEFAULT_PRODUCT_REFERENCE
-    );
+  const configuration =
+    getCloudprinterProductConfiguration({
+      productKind,
+      totalPages,
+    });
 
-  const shippingLevel =
-    getEnvironmentVariable(
-      "CLOUDPRINTER_SHIPPING_LEVEL",
-      DEFAULT_SHIPPING_LEVEL
-    );
-
-  const orderId = String(order.id);
+  const orderId =
+    String(order.id);
 
   const orderNumber =
     firstAvailable(
@@ -590,15 +753,19 @@ function buildCloudprinterOrderPayload({
       order.id
     );
 
-  const itemId = String(
-    lineItem.id
-  );
+  const itemId =
+    String(lineItem.id);
 
   const quantity =
-    Number(lineItem.quantity || 1);
+    Number(
+      lineItem.quantity ||
+        1
+    );
 
   if (
-    !Number.isInteger(quantity) ||
+    !Number.isInteger(
+      quantity
+    ) ||
     quantity <= 0
   ) {
     throw new Error(
@@ -611,59 +778,77 @@ function buildCloudprinterOrderPayload({
       orderId,
       orderNumber,
       itemId,
+      productKind:
+        configuration.productKind,
     });
 
   const itemReference =
     buildCloudprinterItemReference({
       orderId,
       itemId,
+      productKind:
+        configuration.productKind,
     });
+
+  const defaultTitle =
+    configuration.productKind ===
+    "calendar"
+      ? "Fresh Start Paper Calendar"
+      : "Fresh Start Paper Journal";
 
   const title =
     firstAvailable(
       lineItem.title,
       lineItem.name,
-      "Fresh Start Paper Journal"
+      defaultTitle
     );
+
+  const cloudprinterFiles =
+    configuration.filesBuilder(
+      uploadedFiles
+    );
+
+  const cloudprinterOptions =
+    configuration.optionsBuilder();
 
   const payload = {
     apikey: apiKey,
 
-    reference: orderReference,
+    reference:
+      orderReference,
 
-    /*
-     * Cloudprinter documents this as the client's support
-     * email for processing or production questions.
-     */
-    email: supportEmail,
+    email:
+      supportEmail,
 
     addresses: [
-      buildDeliveryAddress(order),
+      buildDeliveryAddress(
+        order
+      ),
     ],
 
     items: [
       {
-        reference: itemReference,
+        reference:
+          itemReference,
 
         product:
-          productReference,
+          configuration
+            .productReference,
 
         shipping_level:
-          shippingLevel,
+          configuration
+            .shippingLevel,
 
         title,
 
-        count: String(quantity),
+        count:
+          String(quantity),
 
         files:
-          buildCloudprinterFiles(
-            uploadedFiles
-          ),
+          cloudprinterFiles,
 
         options:
-          buildCloudprinterOptions(
-            totalPages
-          ),
+          cloudprinterOptions,
       },
     ],
   };
@@ -672,11 +857,21 @@ function buildCloudprinterOrderPayload({
     payload,
     orderReference,
     itemReference,
+    productKind:
+      configuration.productKind,
+    productReference:
+      configuration
+        .productReference,
+    shippingLevel:
+      configuration
+        .shippingLevel,
+    totalPages:
+      configuration.totalPages,
   };
 }
 
 /**
- * Return a readable Cloudprinter API error.
+ * Return a readable Cloudprinter error.
  */
 function createCloudprinterError(
   error
@@ -711,7 +906,8 @@ function createCloudprinterError(
   }
 
   if (
-    error.code === "ECONNABORTED"
+    error.code ===
+    "ECONNABORTED"
   ) {
     return new Error(
       "The Cloudprinter request timed out"
@@ -725,23 +921,38 @@ function createCloudprinterError(
 
 /**
  * Submit one Shopify line item to Cloudprinter.
+ *
+ * Journals:
+ * - book + cover
+ *
+ * Calendars:
+ * - product
  */
 async function submitCloudprinterOrder({
   order,
   lineItem,
   uploadedFiles,
-  totalPages = DEFAULT_TOTAL_PAGES,
+  totalPages =
+    DEFAULT_JOURNAL_TOTAL_PAGES,
+  productKind = "journal",
 }) {
   const {
     payload,
     orderReference,
     itemReference,
+    productKind:
+      resolvedProductKind,
+    productReference,
+    shippingLevel,
+    totalPages:
+      resolvedTotalPages,
   } =
     buildCloudprinterOrderPayload({
       order,
       lineItem,
       uploadedFiles,
       totalPages,
+      productKind,
     });
 
   console.log(
@@ -751,6 +962,8 @@ async function submitCloudprinterOrder({
   console.log({
     orderReference,
     itemReference,
+    productKind:
+      resolvedProductKind,
     shopifyOrderId:
       order.id,
     shopifyOrderNumber:
@@ -760,19 +973,25 @@ async function submitCloudprinterOrder({
     shopifyItemId:
       lineItem.id,
     product:
-      payload.items[0].product,
+      productReference,
     quantity:
       payload.items[0].count,
-    shippingLevel:
-      payload.items[0]
-        .shipping_level,
-    totalPages,
+    shippingLevel,
+    totalPages:
+      resolvedTotalPages,
+    fileTypes:
+      payload.items[0].files.map(
+        (file) =>
+          file.type
+      ),
+    optionTypes:
+      payload.items[0].options.map(
+        (option) =>
+          option.type
+      ),
     deliveryCountry:
       payload.addresses[0]
         .country,
-    /*
-     * Do not log the API key.
-     */
     apiKeyConfigured: true,
   });
 
@@ -786,7 +1005,8 @@ async function submitCloudprinterOrder({
         {
           timeout: 45000,
 
-          maxBodyLength: Infinity,
+          maxBodyLength:
+            Infinity,
 
           headers: {
             Accept:
@@ -795,10 +1015,6 @@ async function submitCloudprinterOrder({
               "application/json",
           },
 
-          /*
-           * Cloudprinter documents HTTP 201 as the successful
-           * response for creating an order.
-           */
           validateStatus:
             () => true,
         }
@@ -809,7 +1025,10 @@ async function submitCloudprinterOrder({
     );
   }
 
-  if (response.status !== 201) {
+  if (
+    response.status !==
+    201
+  ) {
     const requestError =
       new Error(
         [
@@ -841,6 +1060,8 @@ async function submitCloudprinterOrder({
   console.log({
     orderReference,
     itemReference,
+    productKind:
+      resolvedProductKind,
     status:
       response.status,
     response:
@@ -849,6 +1070,9 @@ async function submitCloudprinterOrder({
 
   return {
     success: true,
+    productKind:
+      resolvedProductKind,
+    productReference,
     orderReference,
     itemReference,
     status:
@@ -861,4 +1085,8 @@ async function submitCloudprinterOrder({
 module.exports = {
   submitCloudprinterOrder,
   buildCloudprinterOrderPayload,
+  buildJournalFiles,
+  buildCalendarFiles,
+  buildJournalOptions,
+  buildCalendarOptions,
 };
