@@ -20,13 +20,32 @@ let cachedAccessTokenExpiresAt = 0;
 
 /*
 |--------------------------------------------------------------------------
-| Normalize Shopify store domain
+| General helpers
 |--------------------------------------------------------------------------
 */
 
+function cleanString(value, fallback = "") {
+  if (
+    value === undefined ||
+    value === null
+  ) {
+    return fallback;
+  }
+
+  const cleaned = String(value).trim();
+
+  return cleaned || fallback;
+}
+
+function normalizeValue(value) {
+  return cleanString(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 function normalizeShopifyStore(store) {
-  return String(store || "")
-    .trim()
+  return cleanString(store)
     .replace(/^https?:\/\//i, "")
     .replace(/\/+$/, "");
 }
@@ -45,7 +64,7 @@ function normalizeShopifyStore(store) {
 */
 
 function extractNumericIdFromGid(gid) {
-  const value = String(gid || "").trim();
+  const value = cleanString(gid);
 
   if (!value) {
     return null;
@@ -54,7 +73,10 @@ function extractNumericIdFromGid(gid) {
   const parts = value.split("/");
   const numericId = parts[parts.length - 1];
 
-  if (!numericId || !/^\d+$/.test(numericId)) {
+  if (
+    !numericId ||
+    !/^\d+$/.test(numericId)
+  ) {
     return null;
   }
 
@@ -63,7 +85,7 @@ function extractNumericIdFromGid(gid) {
 
 /*
 |--------------------------------------------------------------------------
-| Extract Shopify error details
+| Shopify error helper
 |--------------------------------------------------------------------------
 */
 
@@ -94,7 +116,7 @@ function getShopifyErrorDetails(error) {
 
 /*
 |--------------------------------------------------------------------------
-| Get Shopify Admin API access token
+| Shopify access token
 |--------------------------------------------------------------------------
 */
 
@@ -104,13 +126,15 @@ async function getShopifyAccessToken() {
       process.env.SHOPIFY_STORE
     );
 
-  const clientId = String(
-    process.env.SHOPIFY_CLIENT_ID || ""
-  ).trim();
+  const clientId =
+    cleanString(
+      process.env.SHOPIFY_CLIENT_ID
+    );
 
-  const clientSecret = String(
-    process.env.SHOPIFY_CLIENT_SECRET || ""
-  ).trim();
+  const clientSecret =
+    cleanString(
+      process.env.SHOPIFY_CLIENT_SECRET
+    );
 
   if (!shopifyStore) {
     throw new Error(
@@ -133,8 +157,8 @@ async function getShopifyAccessToken() {
   const now = Date.now();
 
   /*
-   * Reuse the current access token while it remains valid.
-   * Request a replacement shortly before expiration.
+   * Reuse the existing access token until shortly before
+   * its expiration time.
    */
   if (
     cachedAccessToken &&
@@ -150,14 +174,16 @@ async function getShopifyAccessToken() {
 
   const requestBody =
     new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: clientId,
-      client_secret: clientSecret,
+      grant_type:
+        "client_credentials",
+      client_id:
+        clientId,
+      client_secret:
+        clientSecret,
     });
 
   console.log(
-    "Requesting Shopify token from:",
-    tokenUrl
+    "Requesting Shopify access token."
   );
 
   const response = await axios.post(
@@ -167,7 +193,8 @@ async function getShopifyAccessToken() {
       headers: {
         "Content-Type":
           "application/x-www-form-urlencoded",
-        Accept: "application/json",
+        Accept:
+          "application/json",
       },
       timeout: 15000,
     }
@@ -188,7 +215,8 @@ async function getShopifyAccessToken() {
     );
   }
 
-  cachedAccessToken = accessToken;
+  cachedAccessToken =
+    accessToken;
 
   cachedAccessTokenExpiresAt =
     Date.now() +
@@ -207,7 +235,7 @@ async function getShopifyAccessToken() {
 
 /*
 |--------------------------------------------------------------------------
-| Find Shopify order
+| Find the Shopify order
 |--------------------------------------------------------------------------
 */
 
@@ -227,13 +255,10 @@ async function findShopifyOrder(
     `/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
 
   /*
-   * We intentionally query order.email directly.
+   * SKU is included so calendar items can be identified using:
    *
-   * Do not add customer { email } here. Accessing the Customer object
-   * requires the additional read_customers scope, which this app does
-   * not need for the download lookup.
+   * CUSTOM-CALENDAR
    */
-
   const query = `
     query FindOrder($searchQuery: String!) {
       orders(
@@ -251,7 +276,10 @@ async function findShopifyOrder(
             nodes {
               id
               title
+              name
               quantity
+              sku
+              variantTitle
             }
           }
         }
@@ -281,14 +309,17 @@ async function findShopifyOrder(
           accessToken,
         "Content-Type":
           "application/json",
-        Accept: "application/json",
+        Accept:
+          "application/json",
       },
       timeout: 15000,
     }
   );
 
   if (
-    Array.isArray(response.data?.errors) &&
+    Array.isArray(
+      response.data?.errors
+    ) &&
     response.data.errors.length > 0
   ) {
     const graphqlMessage =
@@ -299,7 +330,9 @@ async function findShopifyOrder(
         )
         .join("; ");
 
-    throw new Error(graphqlMessage);
+    throw new Error(
+      graphqlMessage
+    );
   }
 
   const orders =
@@ -319,22 +352,309 @@ async function findShopifyOrder(
   }
 
   const requestedNumber =
-    String(orderNumber)
+    cleanString(orderNumber)
       .replace(/^#/, "")
       .trim();
 
   return (
     orders.find((order) => {
       const orderName =
-        String(order.name || "")
+        cleanString(order.name)
           .replace(/^#/, "")
           .trim();
 
       return (
-        orderName === requestedNumber
+        orderName ===
+        requestedNumber
       );
     }) || null
   );
+}
+
+/*
+|--------------------------------------------------------------------------
+| Product detection
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * Return all calendar SKUs configured in Render.
+ *
+ * Expected:
+ * CALENDAR_SHOPIFY_SKUS=CUSTOM-CALENDAR
+ */
+function getConfiguredCalendarSkus() {
+  return cleanString(
+    process.env.CALENDAR_SHOPIFY_SKUS,
+    "CUSTOM-CALENDAR"
+  )
+    .split(",")
+    .map(normalizeValue)
+    .filter(Boolean);
+}
+
+/**
+ * Detect whether a Shopify item is a calendar.
+ */
+function isCalendarShopifyItem(item) {
+  const itemSku =
+    normalizeValue(item?.sku);
+
+  const calendarSkus =
+    getConfiguredCalendarSkus();
+
+  if (
+    itemSku &&
+    calendarSkus.includes(itemSku)
+  ) {
+    return true;
+  }
+
+  const searchableText = [
+    item?.title,
+    item?.name,
+    item?.variantTitle,
+  ]
+    .map(normalizeValue)
+    .filter(Boolean)
+    .join(" ");
+
+  return searchableText.includes(
+    "calendar"
+  );
+}
+
+/**
+ * Detect the product kind from the manifest and Shopify item.
+ *
+ * This supports:
+ *
+ * 1. New manifests that may include productKind
+ * 2. Shopify SKU detection
+ * 3. Existing manifests where:
+ *    - calendar = one product file and no cover
+ *    - journal = interior/product file plus cover
+ */
+function resolveDownloadProductKind({
+  item,
+  manifest,
+  productFile,
+  coverFile,
+}) {
+  const manifestProductKind =
+    normalizeValue(
+      manifest?.productKind ||
+      manifest?.product_kind ||
+      manifest?.kind
+    );
+
+  if (
+    manifestProductKind ===
+    "calendar"
+  ) {
+    return "calendar";
+  }
+
+  if (
+    manifestProductKind ===
+    "journal"
+  ) {
+    return "journal";
+  }
+
+  if (
+    isCalendarShopifyItem(item)
+  ) {
+    return "calendar";
+  }
+
+  if (
+    productFile &&
+    !coverFile
+  ) {
+    return "calendar";
+  }
+
+  return "journal";
+}
+
+/*
+|--------------------------------------------------------------------------
+| Manifest file helpers
+|--------------------------------------------------------------------------
+*/
+
+function findProductFile(files) {
+  return (
+    files.find(
+      (file) =>
+        file.type === "product"
+    ) ||
+    files.find(
+      (file) =>
+        file.type === "calendar"
+    ) ||
+    files.find(
+      (file) =>
+        file.type === "journal"
+    ) ||
+    files.find(
+      (file) =>
+        file.type === "interior"
+    ) ||
+    null
+  );
+}
+
+function findInteriorFile(files) {
+  return (
+    files.find(
+      (file) =>
+        file.type === "interior"
+    ) ||
+    files.find(
+      (file) =>
+        file.type === "journal"
+    ) ||
+    files.find(
+      (file) =>
+        file.type === "product"
+    ) ||
+    null
+  );
+}
+
+function findCoverFile(files) {
+  return (
+    files.find(
+      (file) =>
+        file.type === "cover"
+    ) || null
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| Build one calendar download result
+|--------------------------------------------------------------------------
+*/
+
+function buildCalendarDownload({
+  item,
+  itemId,
+  manifest,
+}) {
+  const files =
+    Array.isArray(manifest.files)
+      ? manifest.files
+      : [];
+
+  const calendar =
+    findProductFile(files);
+
+  if (!calendar?.url) {
+    return null;
+  }
+
+  return {
+    product:
+      item.title ||
+      item.name ||
+      "Custom Calendar",
+
+    productKind:
+      "calendar",
+
+    itemId,
+
+    sku:
+      item.sku || null,
+
+    quantity:
+      item.quantity || 1,
+
+    calendar,
+
+    journal: null,
+
+    cover: null,
+
+    files: {
+      calendar,
+      journal: null,
+      cover: null,
+    },
+
+    manifestUrl:
+      manifest.manifestUrl ||
+      manifest.manifest_url ||
+      null,
+  };
+}
+
+/*
+|--------------------------------------------------------------------------
+| Build one journal download result
+|--------------------------------------------------------------------------
+*/
+
+function buildJournalDownload({
+  item,
+  itemId,
+  manifest,
+}) {
+  const files =
+    Array.isArray(manifest.files)
+      ? manifest.files
+      : [];
+
+  const journal =
+    findInteriorFile(files);
+
+  const cover =
+    findCoverFile(files);
+
+  if (
+    !journal?.url &&
+    !cover?.url
+  ) {
+    return null;
+  }
+
+  return {
+    product:
+      item.title ||
+      item.name ||
+      "Custom Journal",
+
+    productKind:
+      "journal",
+
+    itemId,
+
+    sku:
+      item.sku || null,
+
+    quantity:
+      item.quantity || 1,
+
+    calendar: null,
+
+    journal,
+
+    cover,
+
+    files: {
+      calendar: null,
+      journal,
+      cover,
+    },
+
+    manifestUrl:
+      manifest.manifestUrl ||
+      manifest.manifest_url ||
+      null,
+  };
 }
 
 /*
@@ -348,6 +668,10 @@ router.get("/", (req, res) => {
     success: true,
     message:
       "Downloads route is working.",
+    supportedProducts: [
+      "journal",
+      "calendar",
+    ],
     timestamp:
       new Date().toISOString(),
   });
@@ -361,27 +685,29 @@ router.get("/", (req, res) => {
 
 router.post("/", async (req, res) => {
   try {
-    const orderNumber = String(
-      req.body?.orderNumber || ""
-    )
-      .replace(/^#/, "")
-      .trim();
+    const orderNumber =
+      cleanString(
+        req.body?.orderNumber
+      )
+        .replace(/^#/, "")
+        .trim();
 
-    const submittedEmail = String(
-      req.body?.email || ""
-    )
-      .trim()
-      .toLowerCase();
+    const submittedEmail =
+      cleanString(
+        req.body?.email
+      ).toLowerCase();
 
     if (
       !orderNumber ||
       !submittedEmail
     ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Order number and email are required.",
-      });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message:
+            "Order number and email are required.",
+        });
     }
 
     console.log(
@@ -394,35 +720,41 @@ router.post("/", async (req, res) => {
       );
 
     if (!order) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Order not found. Enter the Shopify order number, such as 1017.",
-      });
+      return res
+        .status(404)
+        .json({
+          success: false,
+          message:
+            "Order not found. Enter the Shopify order number, such as 1017.",
+        });
     }
 
-    const orderEmail = String(
-      order.email || ""
-    )
-      .trim()
-      .toLowerCase();
+    const orderEmail =
+      cleanString(
+        order.email
+      ).toLowerCase();
 
     if (!orderEmail) {
-      return res.status(403).json({
-        success: false,
-        message:
-          "No email address was found on this order.",
-      });
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message:
+            "No email address was found on this order.",
+        });
     }
 
     if (
-      orderEmail !== submittedEmail
+      orderEmail !==
+      submittedEmail
     ) {
-      return res.status(403).json({
-        success: false,
-        message:
-          "The order number and email address do not match.",
-      });
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message:
+            "The order number and email address do not match.",
+        });
     }
 
     const orderId =
@@ -491,38 +823,68 @@ router.post("/", async (req, res) => {
           continue;
         }
 
-        const journal =
-          manifest.files.find(
-            (file) =>
-              file.type === "product" ||
-              file.type === "journal" ||
-              file.type === "interior"
-          ) || null;
+        const productFile =
+          findProductFile(
+            manifest.files
+          );
 
-        const cover =
-          manifest.files.find(
-            (file) =>
-              file.type === "cover"
-          ) || null;
+        const coverFile =
+          findCoverFile(
+            manifest.files
+          );
 
-        if (!journal && !cover) {
+        const productKind =
+          resolveDownloadProductKind({
+            item,
+            manifest,
+            productFile,
+            coverFile,
+          });
+
+        console.log(
+          "===== DOWNLOAD PRODUCT RESOLUTION ====="
+        );
+
+        console.log({
+          orderId,
+          itemId,
+          title:
+            item.title,
+          sku:
+            item.sku,
+          productKind,
+          manifestFileTypes:
+            manifest.files.map(
+              (file) =>
+                file.type
+            ),
+        });
+
+        const download =
+          productKind ===
+          "calendar"
+            ? buildCalendarDownload({
+                item,
+                itemId,
+                manifest,
+              })
+            : buildJournalDownload({
+                item,
+                itemId,
+                manifest,
+              });
+
+        if (!download) {
           console.log(
-            `Manifest contains no journal or cover for item ${itemId}`
+            `Manifest does not contain usable ${productKind} files for item ${itemId}`
           );
 
           continue;
         }
 
-        downloads.push({
-          product:
-            item.title ||
-            "Custom Journal",
-          itemId,
-          quantity:
-            item.quantity || 1,
-          journal,
-          cover,
-        });
+        downloads.push(
+          download
+        );
       } catch (manifestError) {
         console.error(
           `Manifest error for item ${itemId}:`,
@@ -532,24 +894,41 @@ router.post("/", async (req, res) => {
     }
 
     if (downloads.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Your journal files were not found or are still being generated.",
-      });
+      return res
+        .status(404)
+        .json({
+          success: false,
+          message:
+            "Your files were not found or are still being generated.",
+        });
     }
 
-    return res.status(200).json({
-      success: true,
-      orderNumber:
-        order.name,
-      downloads,
-    });
+    const productKinds = [
+      ...new Set(
+        downloads.map(
+          (download) =>
+            download.productKind
+        )
+      ),
+    ];
+
+    return res
+      .status(200)
+      .json({
+        success: true,
+        orderNumber:
+          order.name,
+        productKinds,
+        downloads,
+      });
   } catch (error) {
     const {
       status,
       shopifyMessage,
-    } = getShopifyErrorDetails(error);
+    } =
+      getShopifyErrorDetails(
+        error
+      );
 
     console.error(
       "Downloads request failed:",
@@ -564,51 +943,63 @@ router.post("/", async (req, res) => {
     );
 
     if (status === 400) {
-      return res.status(500).json({
-        success: false,
-        message:
-          shopifyMessage ||
-          "Shopify rejected the request with status 400.",
-      });
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            shopifyMessage ||
+            "Shopify rejected the request with status 400.",
+        });
     }
 
     if (status === 401) {
-      return res.status(500).json({
-        success: false,
-        message:
-          shopifyMessage ||
-          "Shopify rejected the Client ID or Client secret.",
-      });
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            shopifyMessage ||
+            "Shopify rejected the Client ID or Client secret.",
+        });
     }
 
     if (status === 403) {
-      return res.status(500).json({
-        success: false,
-        message:
-          shopifyMessage ||
-          "Shopify denied access to the order.",
-      });
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            shopifyMessage ||
+            "Shopify denied access to the order.",
+        });
     }
 
     if (
-      String(error.message).includes(
+      String(
+        error.message
+      ).includes(
         "SHOPIFY_"
       )
     ) {
-      return res.status(500).json({
-        success: false,
-        message:
-          error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          success: false,
+          message:
+            error.message,
+        });
     }
 
-    return res.status(500).json({
-      success: false,
-      message:
-        shopifyMessage ||
-        error.message ||
-        "Unable to retrieve downloads.",
-    });
+    return res
+      .status(500)
+      .json({
+        success: false,
+        message:
+          shopifyMessage ||
+          error.message ||
+          "Unable to retrieve downloads.",
+      });
   }
 });
 
