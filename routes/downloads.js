@@ -3,11 +3,15 @@ const axios = require("axios");
 
 const {
   getOrderFiles,
-} = require("../services/orderFileStore");
+} = require(
+  "../services/orderFileStore"
+);
 
-const router = express.Router();
+const router =
+  express.Router();
 
-const SHOPIFY_API_VERSION = "2026-07";
+const SHOPIFY_API_VERSION =
+  "2026-07";
 
 /*
 |--------------------------------------------------------------------------
@@ -24,7 +28,10 @@ let cachedAccessTokenExpiresAt = 0;
 |--------------------------------------------------------------------------
 */
 
-function cleanString(value, fallback = "") {
+function cleanString(
+  value,
+  fallback = ""
+) {
   if (
     value === undefined ||
     value === null
@@ -32,7 +39,8 @@ function cleanString(value, fallback = "") {
     return fallback;
   }
 
-  const cleaned = String(value).trim();
+  const cleaned =
+    String(value).trim();
 
   return cleaned || fallback;
 }
@@ -40,42 +48,68 @@ function cleanString(value, fallback = "") {
 function normalizeValue(value) {
   return cleanString(value)
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    .replace(
+      /[^a-z0-9]+/g,
+      "-"
+    )
+    .replace(
+      /^-+|-+$/g,
+      ""
+    );
 }
 
-function normalizeShopifyStore(store) {
+function normalizeKey(value) {
+  return cleanString(value)
+    .toLowerCase()
+    .replace(
+      /[^a-z0-9]/g,
+      ""
+    );
+}
+
+function normalizeShopifyStore(
+  store
+) {
   return cleanString(store)
-    .replace(/^https?:\/\//i, "")
-    .replace(/\/+$/, "");
+    .replace(
+      /^https?:\/\//i,
+      ""
+    )
+    .replace(
+      /\/+$/,
+      ""
+    );
 }
 
 /*
 |--------------------------------------------------------------------------
-| Extract numeric ID from Shopify GraphQL GID
-|--------------------------------------------------------------------------
-|
-| Example:
-| gid://shopify/LineItem/123456789
-|
-| Returns:
-| 123456789
+| Shopify IDs
 |--------------------------------------------------------------------------
 */
 
-function extractNumericIdFromGid(gid) {
-  const value = cleanString(gid);
+function extractNumericIdFromGid(
+  gid
+) {
+  const value =
+    cleanString(gid);
 
   if (!value) {
     return null;
   }
 
-  const parts = value.split("/");
-  const numericId = parts[parts.length - 1];
+  const parts =
+    value.split("/");
+
+  const numericId =
+    parts[
+      parts.length - 1
+    ];
 
   if (
     !numericId ||
-    !/^\d+$/.test(numericId)
+    !/^\d+$/.test(
+      numericId
+    )
   ) {
     return null;
   }
@@ -85,21 +119,112 @@ function extractNumericIdFromGid(gid) {
 
 /*
 |--------------------------------------------------------------------------
-| Shopify error helper
+| Shopify custom attributes
 |--------------------------------------------------------------------------
 */
 
-function getShopifyErrorDetails(error) {
+function customAttributesToObject(
+  item
+) {
+  const result = {};
+
+  const attributes =
+    Array.isArray(
+      item?.customAttributes
+    )
+      ? item.customAttributes
+      : [];
+
+  for (
+    const attribute
+    of attributes
+  ) {
+    const key =
+      cleanString(
+        attribute?.key
+      );
+
+    if (!key) {
+      continue;
+    }
+
+    const value =
+      cleanString(
+        attribute?.value
+      );
+
+    result[key] = value;
+    result[
+      normalizeKey(key)
+    ] = value;
+  }
+
+  return result;
+}
+
+function getItemProperty(
+  item,
+  names,
+  fallback = ""
+) {
+  const properties =
+    customAttributesToObject(
+      item
+    );
+
+  for (
+    const name
+    of names
+  ) {
+    const directValue =
+      cleanString(
+        properties[name]
+      );
+
+    if (directValue) {
+      return directValue;
+    }
+
+    const normalizedValue =
+      cleanString(
+        properties[
+          normalizeKey(name)
+        ]
+      );
+
+    if (normalizedValue) {
+      return normalizedValue;
+    }
+  }
+
+  return fallback;
+}
+
+/*
+|--------------------------------------------------------------------------
+| Shopify errors
+|--------------------------------------------------------------------------
+*/
+
+function getShopifyErrorDetails(
+  error
+) {
   const status =
-    error.response?.status || null;
+    error.response?.status ||
+    null;
 
   const data =
-    error.response?.data || null;
+    error.response?.data ||
+    null;
 
   let shopifyMessage = "";
 
-  if (typeof data === "string") {
-    shopifyMessage = data;
+  if (
+    typeof data ===
+    "string"
+  ) {
+    shopifyMessage =
+      data;
   } else if (data) {
     shopifyMessage =
       data.error_description ||
@@ -116,24 +241,27 @@ function getShopifyErrorDetails(error) {
 
 /*
 |--------------------------------------------------------------------------
-| Shopify access token
+| Shopify token
 |--------------------------------------------------------------------------
 */
 
 async function getShopifyAccessToken() {
   const shopifyStore =
     normalizeShopifyStore(
-      process.env.SHOPIFY_STORE
+      process.env
+        .SHOPIFY_STORE
     );
 
   const clientId =
     cleanString(
-      process.env.SHOPIFY_CLIENT_ID
+      process.env
+        .SHOPIFY_CLIENT_ID
     );
 
   const clientSecret =
     cleanString(
-      process.env.SHOPIFY_CLIENT_SECRET
+      process.env
+        .SHOPIFY_CLIENT_SECRET
     );
 
   if (!shopifyStore) {
@@ -154,12 +282,9 @@ async function getShopifyAccessToken() {
     );
   }
 
-  const now = Date.now();
+  const now =
+    Date.now();
 
-  /*
-   * Reuse the existing access token until shortly before
-   * its expiration time.
-   */
   if (
     cachedAccessToken &&
     cachedAccessTokenExpiresAt >
@@ -176,8 +301,10 @@ async function getShopifyAccessToken() {
     new URLSearchParams({
       grant_type:
         "client_credentials",
+
       client_id:
         clientId,
+
       client_secret:
         clientSecret,
     });
@@ -186,27 +313,34 @@ async function getShopifyAccessToken() {
     "Requesting Shopify access token."
   );
 
-  const response = await axios.post(
-    tokenUrl,
-    requestBody.toString(),
-    {
-      headers: {
-        "Content-Type":
-          "application/x-www-form-urlencoded",
-        Accept:
-          "application/json",
-      },
-      timeout: 15000,
-    }
-  );
+  const response =
+    await axios.post(
+      tokenUrl,
+
+      requestBody.toString(),
+
+      {
+        headers: {
+          "Content-Type":
+            "application/x-www-form-urlencoded",
+
+          Accept:
+            "application/json",
+        },
+
+        timeout: 15000,
+      }
+    );
 
   const accessToken =
-    response.data?.access_token;
+    response.data
+      ?.access_token;
 
   const expiresInSeconds =
     Number(
-      response.data?.expires_in ||
-      86399
+      response.data
+        ?.expires_in ||
+        86399
     );
 
   if (!accessToken) {
@@ -221,7 +355,8 @@ async function getShopifyAccessToken() {
   cachedAccessTokenExpiresAt =
     Date.now() +
     Math.max(
-      expiresInSeconds - 300,
+      expiresInSeconds -
+        300,
       60
     ) *
       1000;
@@ -235,7 +370,7 @@ async function getShopifyAccessToken() {
 
 /*
 |--------------------------------------------------------------------------
-| Find the Shopify order
+| Find Shopify order
 |--------------------------------------------------------------------------
 */
 
@@ -244,7 +379,8 @@ async function findShopifyOrder(
 ) {
   const shopifyStore =
     normalizeShopifyStore(
-      process.env.SHOPIFY_STORE
+      process.env
+        .SHOPIFY_STORE
     );
 
   const accessToken =
@@ -255,10 +391,10 @@ async function findShopifyOrder(
     `/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
 
   /*
-   * SKU is included so calendar items can be identified using:
-   *
-   * CUSTOM-CALENDAR
+   * customAttributes contains Shopify line-item properties.
+   * Those properties identify journals, notebooks and calendars.
    */
+
   const query = `
     query FindOrder($searchQuery: String!) {
       orders(
@@ -272,6 +408,7 @@ async function findShopifyOrder(
           legacyResourceId
           name
           email
+
           lineItems(first: 100) {
             nodes {
               id
@@ -280,6 +417,11 @@ async function findShopifyOrder(
               quantity
               sku
               variantTitle
+
+              customAttributes {
+                key
+                value
+              }
             }
           }
         }
@@ -295,32 +437,40 @@ async function findShopifyOrder(
     searchQuery
   );
 
-  const response = await axios.post(
-    graphqlUrl,
-    {
-      query,
-      variables: {
-        searchQuery,
+  const response =
+    await axios.post(
+      graphqlUrl,
+
+      {
+        query,
+
+        variables: {
+          searchQuery,
+        },
       },
-    },
-    {
-      headers: {
-        "X-Shopify-Access-Token":
-          accessToken,
-        "Content-Type":
-          "application/json",
-        Accept:
-          "application/json",
-      },
-      timeout: 15000,
-    }
-  );
+
+      {
+        headers: {
+          "X-Shopify-Access-Token":
+            accessToken,
+
+          "Content-Type":
+            "application/json",
+
+          Accept:
+            "application/json",
+        },
+
+        timeout: 15000,
+      }
+    );
 
   if (
     Array.isArray(
       response.data?.errors
     ) &&
-    response.data.errors.length > 0
+    response.data.errors
+      .length > 0
   ) {
     const graphqlMessage =
       response.data.errors
@@ -336,7 +486,10 @@ async function findShopifyOrder(
   }
 
   const orders =
-    response.data?.data?.orders?.nodes;
+    response.data
+      ?.data
+      ?.orders
+      ?.nodes;
 
   if (!Array.isArray(orders)) {
     console.error(
@@ -352,22 +505,31 @@ async function findShopifyOrder(
   }
 
   const requestedNumber =
-    cleanString(orderNumber)
+    cleanString(
+      orderNumber
+    )
       .replace(/^#/, "")
       .trim();
 
   return (
-    orders.find((order) => {
-      const orderName =
-        cleanString(order.name)
-          .replace(/^#/, "")
-          .trim();
+    orders.find(
+      (order) => {
+        const orderName =
+          cleanString(
+            order.name
+          )
+            .replace(
+              /^#/,
+              ""
+            )
+            .trim();
 
-      return (
-        orderName ===
-        requestedNumber
-      );
-    }) || null
+        return (
+          orderName ===
+          requestedNumber
+        );
+      }
+    ) || null
   );
 }
 
@@ -377,103 +539,198 @@ async function findShopifyOrder(
 |--------------------------------------------------------------------------
 */
 
-/**
- * Return all calendar SKUs configured in Render.
- *
- * Expected:
- * CALENDAR_SHOPIFY_SKUS=CUSTOM-CALENDAR
- */
-function getConfiguredCalendarSkus() {
-  return cleanString(
-    process.env.CALENDAR_SHOPIFY_SKUS,
-    "CUSTOM-CALENDAR"
-  )
-    .split(",")
-    .map(normalizeValue)
-    .filter(Boolean);
-}
+function createItemSearchText(
+  item
+) {
+  const properties =
+    customAttributesToObject(
+      item
+    );
 
-/**
- * Detect whether a Shopify item is a calendar.
- */
-function isCalendarShopifyItem(item) {
-  const itemSku =
-    normalizeValue(item?.sku);
-
-  const calendarSkus =
-    getConfiguredCalendarSkus();
-
-  if (
-    itemSku &&
-    calendarSkus.includes(itemSku)
-  ) {
-    return true;
-  }
-
-  const searchableText = [
+  return [
     item?.title,
     item?.name,
+    item?.sku,
     item?.variantTitle,
-  ]
-    .map(normalizeValue)
-    .filter(Boolean)
-    .join(" ");
 
-  return searchableText.includes(
-    "calendar"
-  );
+    ...Object.keys(
+      properties
+    ),
+
+    ...Object.values(
+      properties
+    ),
+  ]
+    .map(cleanString)
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 }
 
-/**
- * Detect the product kind from the manifest and Shopify item.
- *
- * This supports:
- *
- * 1. New manifests that may include productKind
- * 2. Shopify SKU detection
- * 3. Existing manifests where:
- *    - calendar = one product file and no cover
- *    - journal = interior/product file plus cover
- */
+function detectProductKindFromItem(
+  item
+) {
+  const searchText =
+    createItemSearchText(
+      item
+    );
+
+  const productCode =
+    getItemProperty(
+      item,
+      [
+        "Print product code",
+        "Product code",
+        "Cloudprinter product code",
+        "API reference",
+      ]
+    ).toLowerCase();
+
+  const generatorKind =
+    getItemProperty(
+      item,
+      [
+        "_Generator kind",
+        "Generator kind",
+        "Product kind",
+      ]
+    ).toLowerCase();
+
+  const customizationVersion =
+    getItemProperty(
+      item,
+      [
+        "_Customization version",
+        "Customization version",
+      ]
+    ).toLowerCase();
+
+  /*
+   * Notebook must be checked before journal because both
+   * products contain an interior/book file and a cover file.
+   */
+
+  if (
+    generatorKind ===
+      "notebook" ||
+    productCode.includes(
+      "textbook_co_a3_l_fc_ink"
+    ) ||
+    customizationVersion.includes(
+      "notebook"
+    ) ||
+    getItemProperty(
+      item,
+      ["Notebook title"]
+    ) ||
+    searchText.includes(
+      "textbook_co_a3_l_fc_ink"
+    ) ||
+    /\bnotebook\b/.test(
+      searchText
+    ) ||
+    /\bnotepads?\b/.test(
+      searchText
+    )
+  ) {
+    return "notebook";
+  }
+
+  if (
+    generatorKind ===
+      "calendar" ||
+    productCode.includes(
+      "calendar_wall_int_a5_l_double_fc_tnr"
+    ) ||
+    customizationVersion.includes(
+      "calendar"
+    ) ||
+    getItemProperty(
+      item,
+      ["Calendar title"]
+    ) ||
+    searchText.includes(
+      "calendar_wall_int_a5_l_double_fc_tnr"
+    ) ||
+    /\bcalendar\b/.test(
+      searchText
+    )
+  ) {
+    return "calendar";
+  }
+
+  if (
+    generatorKind ===
+      "journal" ||
+    productCode.includes(
+      "textbook_pb_1025x6630_l_fc_ink"
+    ) ||
+    customizationVersion.includes(
+      "journal"
+    ) ||
+    getItemProperty(
+      item,
+      ["Journal title"]
+    ) ||
+    /\bjournal\b/.test(
+      searchText
+    )
+  ) {
+    return "journal";
+  }
+
+  return null;
+}
+
 function resolveDownloadProductKind({
   item,
   manifest,
-  productFile,
+  primaryFile,
   coverFile,
 }) {
   const manifestProductKind =
     normalizeValue(
       manifest?.productKind ||
-      manifest?.product_kind ||
-      manifest?.kind
+        manifest?.product_kind ||
+        manifest?.kind
     );
 
   if (
-    manifestProductKind ===
-    "calendar"
+    [
+      "journal",
+      "notebook",
+      "calendar",
+    ].includes(
+      manifestProductKind
+    )
   ) {
-    return "calendar";
+    return manifestProductKind;
   }
 
-  if (
-    manifestProductKind ===
-    "journal"
-  ) {
-    return "journal";
+  const detectedKind =
+    detectProductKindFromItem(
+      item
+    );
+
+  if (detectedKind) {
+    return detectedKind;
   }
 
-  if (
-    isCalendarShopifyItem(item)
-  ) {
-    return "calendar";
-  }
+  /*
+   * A single file with no cover is the calendar fallback.
+   */
 
   if (
-    productFile &&
+    primaryFile &&
     !coverFile
   ) {
     return "calendar";
   }
+
+  /*
+   * Legacy manifests containing an interior and cover were
+   * historically journals.
+   */
 
   return "journal";
 }
@@ -484,42 +741,50 @@ function resolveDownloadProductKind({
 |--------------------------------------------------------------------------
 */
 
-function findProductFile(files) {
-  return (
-    files.find(
-      (file) =>
-        file.type === "product"
-    ) ||
-    files.find(
-      (file) =>
-        file.type === "calendar"
-    ) ||
-    files.find(
-      (file) =>
-        file.type === "journal"
-    ) ||
-    files.find(
-      (file) =>
-        file.type === "interior"
-    ) ||
-    null
-  );
+function normalizeManifestFiles(
+  manifest
+) {
+  return Array.isArray(
+    manifest?.files
+  )
+    ? manifest.files.filter(
+        Boolean
+      )
+    : [];
 }
 
-function findInteriorFile(files) {
+function findPrimaryFile(files) {
   return (
     files.find(
       (file) =>
-        file.type === "interior"
+        file.type ===
+        "product"
     ) ||
+
     files.find(
       (file) =>
-        file.type === "journal"
+        file.type ===
+        "book"
     ) ||
+
     files.find(
       (file) =>
-        file.type === "product"
+        file.type ===
+        "interior"
     ) ||
+
+    files.find(
+      (file) =>
+        file.type ===
+        "calendar"
+    ) ||
+
+    files.find(
+      (file) =>
+        file.type ===
+        "journal"
+    ) ||
+
     null
   );
 }
@@ -528,43 +793,103 @@ function findCoverFile(files) {
   return (
     files.find(
       (file) =>
-        file.type === "cover"
-    ) || null
+        file.type ===
+        "cover"
+    ) ||
+    null
   );
 }
 
 /*
 |--------------------------------------------------------------------------
-| Build one calendar download result
+| Product display names
 |--------------------------------------------------------------------------
 */
 
-function buildCalendarDownload({
+function getCustomizedProductName(
+  item,
+  productKind
+) {
+  if (
+    productKind ===
+    "notebook"
+  ) {
+    return (
+      getItemProperty(
+        item,
+        ["Notebook title"]
+      ) ||
+      item.title ||
+      item.name ||
+      "Custom Notebook"
+    );
+  }
+
+  if (
+    productKind ===
+    "calendar"
+  ) {
+    return (
+      getItemProperty(
+        item,
+        ["Calendar title"]
+      ) ||
+      item.title ||
+      item.name ||
+      "Custom Calendar"
+    );
+  }
+
+  return (
+    getItemProperty(
+      item,
+      ["Journal title"]
+    ) ||
+    item.title ||
+    item.name ||
+    "Custom Journal"
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| Build download results
+|--------------------------------------------------------------------------
+*/
+
+function buildDownloadResult({
   item,
   itemId,
   manifest,
+  productKind,
 }) {
   const files =
-    Array.isArray(manifest.files)
-      ? manifest.files
-      : [];
+    normalizeManifestFiles(
+      manifest
+    );
 
-  const calendar =
-    findProductFile(files);
+  const primaryFile =
+    findPrimaryFile(files);
 
-  if (!calendar?.url) {
+  const coverFile =
+    findCoverFile(files);
+
+  if (
+    !primaryFile?.url &&
+    !coverFile?.url
+  ) {
     return null;
   }
 
-  return {
-    product:
-      item.title ||
-      item.name ||
-      "Custom Calendar",
+  const product =
+    getCustomizedProductName(
+      item,
+      productKind
+    );
 
-    productKind:
-      "calendar",
-
+  const baseResult = {
+    product,
+    productKind,
     itemId,
 
     sku:
@@ -573,87 +898,125 @@ function buildCalendarDownload({
     quantity:
       item.quantity || 1,
 
-    calendar,
+    primaryFile:
+      primaryFile || null,
 
-    journal: null,
-
-    cover: null,
-
-    files: {
-      calendar,
-      journal: null,
-      cover: null,
-    },
+    coverFile:
+      coverFile || null,
 
     manifestUrl:
       manifest.manifestUrl ||
       manifest.manifest_url ||
       null,
   };
-}
-
-/*
-|--------------------------------------------------------------------------
-| Build one journal download result
-|--------------------------------------------------------------------------
-*/
-
-function buildJournalDownload({
-  item,
-  itemId,
-  manifest,
-}) {
-  const files =
-    Array.isArray(manifest.files)
-      ? manifest.files
-      : [];
-
-  const journal =
-    findInteriorFile(files);
-
-  const cover =
-    findCoverFile(files);
 
   if (
-    !journal?.url &&
-    !cover?.url
+    productKind ===
+    "calendar"
   ) {
-    return null;
+    return {
+      ...baseResult,
+
+      calendar:
+        primaryFile,
+
+      journal:
+        null,
+
+      notebook:
+        null,
+
+      cover:
+        null,
+
+      files: {
+        primary:
+          primaryFile,
+
+        calendar:
+          primaryFile,
+
+        journal:
+          null,
+
+        notebook:
+          null,
+
+        cover:
+          null,
+      },
+    };
+  }
+
+  if (
+    productKind ===
+    "notebook"
+  ) {
+    return {
+      ...baseResult,
+
+      calendar:
+        null,
+
+      journal:
+        null,
+
+      notebook:
+        primaryFile,
+
+      cover:
+        coverFile,
+
+      files: {
+        primary:
+          primaryFile,
+
+        calendar:
+          null,
+
+        journal:
+          null,
+
+        notebook:
+          primaryFile,
+
+        cover:
+          coverFile,
+      },
+    };
   }
 
   return {
-    product:
-      item.title ||
-      item.name ||
-      "Custom Journal",
+    ...baseResult,
 
-    productKind:
-      "journal",
+    calendar:
+      null,
 
-    itemId,
+    journal:
+      primaryFile,
 
-    sku:
-      item.sku || null,
+    notebook:
+      null,
 
-    quantity:
-      item.quantity || 1,
-
-    calendar: null,
-
-    journal,
-
-    cover,
+    cover:
+      coverFile,
 
     files: {
-      calendar: null,
-      journal,
-      cover,
-    },
+      primary:
+        primaryFile,
 
-    manifestUrl:
-      manifest.manifestUrl ||
-      manifest.manifest_url ||
-      null,
+      calendar:
+        null,
+
+      journal:
+        primaryFile,
+
+      notebook:
+        null,
+
+      cover:
+        coverFile,
+    },
   };
 }
 
@@ -663,19 +1026,29 @@ function buildJournalDownload({
 |--------------------------------------------------------------------------
 */
 
-router.get("/", (req, res) => {
-  return res.status(200).json({
-    success: true,
-    message:
-      "Downloads route is working.",
-    supportedProducts: [
-      "journal",
-      "calendar",
-    ],
-    timestamp:
-      new Date().toISOString(),
-  });
-});
+router.get(
+  "/",
+  (req, res) => {
+    return res
+      .status(200)
+      .json({
+        success: true,
+
+        message:
+          "Downloads route is working.",
+
+        supportedProducts: [
+          "journal",
+          "notebook",
+          "calendar",
+        ],
+
+        timestamp:
+          new Date()
+            .toISOString(),
+      });
+  }
+);
 
 /*
 |--------------------------------------------------------------------------
@@ -683,324 +1056,345 @@ router.get("/", (req, res) => {
 |--------------------------------------------------------------------------
 */
 
-router.post("/", async (req, res) => {
-  try {
-    const orderNumber =
-      cleanString(
-        req.body?.orderNumber
-      )
-        .replace(/^#/, "")
-        .trim();
+router.post(
+  "/",
+  async (req, res) => {
+    try {
+      const orderNumber =
+        cleanString(
+          req.body
+            ?.orderNumber
+        )
+          .replace(/^#/, "")
+          .trim();
 
-    const submittedEmail =
-      cleanString(
-        req.body?.email
-      ).toLowerCase();
+      const submittedEmail =
+        cleanString(
+          req.body?.email
+        ).toLowerCase();
 
-    if (
-      !orderNumber ||
-      !submittedEmail
-    ) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message:
-            "Order number and email are required.",
-        });
-    }
+      if (
+        !orderNumber ||
+        !submittedEmail
+      ) {
+        return res
+          .status(400)
+          .json({
+            success: false,
 
-    console.log(
-      `Looking up Shopify order #${orderNumber}`
-    );
-
-    const order =
-      await findShopifyOrder(
-        orderNumber
-      );
-
-    if (!order) {
-      return res
-        .status(404)
-        .json({
-          success: false,
-          message:
-            "Order not found. Enter the Shopify order number, such as 1017.",
-        });
-    }
-
-    const orderEmail =
-      cleanString(
-        order.email
-      ).toLowerCase();
-
-    if (!orderEmail) {
-      return res
-        .status(403)
-        .json({
-          success: false,
-          message:
-            "No email address was found on this order.",
-        });
-    }
-
-    if (
-      orderEmail !==
-      submittedEmail
-    ) {
-      return res
-        .status(403)
-        .json({
-          success: false,
-          message:
-            "The order number and email address do not match.",
-        });
-    }
-
-    const orderId =
-      order.legacyResourceId ||
-      extractNumericIdFromGid(
-        order.id
-      );
-
-    if (!orderId) {
-      throw new Error(
-        "Shopify did not return a usable internal order ID."
-      );
-    }
-
-    const lineItems =
-      order.lineItems?.nodes;
-
-    if (!Array.isArray(lineItems)) {
-      throw new Error(
-        "Shopify did not return the order line items."
-      );
-    }
-
-    console.log(
-      `Found order ${order.name} with ${lineItems.length} line item(s).`
-    );
-
-    const downloads = [];
-
-    for (const item of lineItems) {
-      const itemId =
-        extractNumericIdFromGid(
-          item.id
-        );
-
-      if (!itemId) {
-        console.error(
-          "Unable to extract numeric line-item ID:",
-          item.id
-        );
-
-        continue;
+            message:
+              "Order number and email are required.",
+          });
       }
 
-      try {
-        console.log(
-          `Looking for manifest: order ${orderId}, item ${itemId}`
+      console.log(
+        `Looking up Shopify order #${orderNumber}`
+      );
+
+      const order =
+        await findShopifyOrder(
+          orderNumber
         );
 
-        const manifest =
-          await getOrderFiles({
+      if (!order) {
+        return res
+          .status(404)
+          .json({
+            success: false,
+
+            message:
+              "Order not found. Enter the Shopify order number, such as 1017.",
+          });
+      }
+
+      const orderEmail =
+        cleanString(
+          order.email
+        ).toLowerCase();
+
+      if (!orderEmail) {
+        return res
+          .status(403)
+          .json({
+            success: false,
+
+            message:
+              "No email address was found on this order.",
+          });
+      }
+
+      if (
+        orderEmail !==
+        submittedEmail
+      ) {
+        return res
+          .status(403)
+          .json({
+            success: false,
+
+            message:
+              "The order number and email address do not match.",
+          });
+      }
+
+      const orderId =
+        order.legacyResourceId ||
+        extractNumericIdFromGid(
+          order.id
+        );
+
+      if (!orderId) {
+        throw new Error(
+          "Shopify did not return a usable internal order ID."
+        );
+      }
+
+      const lineItems =
+        order.lineItems
+          ?.nodes;
+
+      if (
+        !Array.isArray(
+          lineItems
+        )
+      ) {
+        throw new Error(
+          "Shopify did not return the order line items."
+        );
+      }
+
+      console.log(
+        `Found order ${order.name} with ${lineItems.length} line item(s).`
+      );
+
+      const downloads = [];
+
+      for (
+        const item
+        of lineItems
+      ) {
+        const itemId =
+          extractNumericIdFromGid(
+            item.id
+          );
+
+        if (!itemId) {
+          console.error(
+            "Unable to extract numeric line-item ID:",
+            item.id
+          );
+
+          continue;
+        }
+
+        try {
+          console.log(
+            `Looking for manifest: order ${orderId}, item ${itemId}`
+          );
+
+          const manifest =
+            await getOrderFiles({
+              orderId,
+              itemId,
+            });
+
+          if (
+            !manifest ||
+            !Array.isArray(
+              manifest.files
+            )
+          ) {
+            console.log(
+              `No manifest found for order ${orderId}, item ${itemId}`
+            );
+
+            continue;
+          }
+
+          const files =
+            normalizeManifestFiles(
+              manifest
+            );
+
+          const primaryFile =
+            findPrimaryFile(
+              files
+            );
+
+          const coverFile =
+            findCoverFile(
+              files
+            );
+
+          const productKind =
+            resolveDownloadProductKind({
+              item,
+              manifest,
+              primaryFile,
+              coverFile,
+            });
+
+          console.log(
+            "===== DOWNLOAD PRODUCT RESOLUTION ====="
+          );
+
+          console.log({
             orderId,
             itemId,
+
+            title:
+              item.title,
+
+            sku:
+              item.sku,
+
+            productKind,
+
+            customAttributes:
+              item.customAttributes,
+
+            manifestProductKind:
+              manifest.productKind ||
+              null,
+
+            manifestFileTypes:
+              files.map(
+                (file) =>
+                  file.type
+              ),
           });
 
-        if (
-          !manifest ||
-          !Array.isArray(
-            manifest.files
-          )
+          const download =
+            buildDownloadResult({
+              item,
+              itemId,
+              manifest,
+              productKind,
+            });
+
+          if (!download) {
+            console.log(
+              `Manifest does not contain usable ${productKind} files for item ${itemId}`
+            );
+
+            continue;
+          }
+
+          downloads.push(
+            download
+          );
+        } catch (
+          manifestError
         ) {
-          console.log(
-            `No manifest found for order ${orderId}, item ${itemId}`
+          console.error(
+            `Manifest error for item ${itemId}:`,
+            manifestError.message
           );
-
-          continue;
         }
+      }
 
-        const productFile =
-          findProductFile(
-            manifest.files
-          );
+      if (
+        downloads.length ===
+        0
+      ) {
+        return res
+          .status(404)
+          .json({
+            success: false,
 
-        const coverFile =
-          findCoverFile(
-            manifest.files
-          );
-
-        const productKind =
-          resolveDownloadProductKind({
-            item,
-            manifest,
-            productFile,
-            coverFile,
+            message:
+              "Your files were not found or are still being generated.",
           });
-
-        console.log(
-          "===== DOWNLOAD PRODUCT RESOLUTION ====="
-        );
-
-        console.log({
-          orderId,
-          itemId,
-          title:
-            item.title,
-          sku:
-            item.sku,
-          productKind,
-          manifestFileTypes:
-            manifest.files.map(
-              (file) =>
-                file.type
-            ),
-        });
-
-        const download =
-          productKind ===
-          "calendar"
-            ? buildCalendarDownload({
-                item,
-                itemId,
-                manifest,
-              })
-            : buildJournalDownload({
-                item,
-                itemId,
-                manifest,
-              });
-
-        if (!download) {
-          console.log(
-            `Manifest does not contain usable ${productKind} files for item ${itemId}`
-          );
-
-          continue;
-        }
-
-        downloads.push(
-          download
-        );
-      } catch (manifestError) {
-        console.error(
-          `Manifest error for item ${itemId}:`,
-          manifestError.message
-        );
       }
-    }
 
-    if (downloads.length === 0) {
+      const productKinds = [
+        ...new Set(
+          downloads.map(
+            (download) =>
+              download.productKind
+          )
+        ),
+      ];
+
       return res
-        .status(404)
+        .status(200)
         .json({
-          success: false,
-          message:
-            "Your files were not found or are still being generated.",
+          success: true,
+
+          orderNumber:
+            order.name,
+
+          productKinds,
+          downloads,
         });
-    }
-
-    const productKinds = [
-      ...new Set(
-        downloads.map(
-          (download) =>
-            download.productKind
-        )
-      ),
-    ];
-
-    return res
-      .status(200)
-      .json({
-        success: true,
-        orderNumber:
-          order.name,
-        productKinds,
-        downloads,
-      });
-  } catch (error) {
-    const {
-      status,
-      shopifyMessage,
-    } =
-      getShopifyErrorDetails(
-        error
-      );
-
-    console.error(
-      "Downloads request failed:",
-      {
+    } catch (error) {
+      const {
         status,
-        message:
-          error.message,
         shopifyMessage,
-        stack:
-          error.stack,
-      }
-    );
+      } =
+        getShopifyErrorDetails(
+          error
+        );
 
-    if (status === 400) {
-      return res
-        .status(500)
-        .json({
-          success: false,
-          message:
-            shopifyMessage ||
-            "Shopify rejected the request with status 400.",
-        });
-    }
+      console.error(
+        "Downloads request failed:",
+        {
+          status,
 
-    if (status === 401) {
-      return res
-        .status(500)
-        .json({
-          success: false,
-          message:
-            shopifyMessage ||
-            "Shopify rejected the Client ID or Client secret.",
-        });
-    }
-
-    if (status === 403) {
-      return res
-        .status(500)
-        .json({
-          success: false,
-          message:
-            shopifyMessage ||
-            "Shopify denied access to the order.",
-        });
-    }
-
-    if (
-      String(
-        error.message
-      ).includes(
-        "SHOPIFY_"
-      )
-    ) {
-      return res
-        .status(500)
-        .json({
-          success: false,
           message:
             error.message,
+
+          shopifyMessage,
+
+          stack:
+            error.stack,
+        }
+      );
+
+      if (
+        [400, 401, 403]
+          .includes(status)
+      ) {
+        return res
+          .status(500)
+          .json({
+            success: false,
+
+            message:
+              shopifyMessage ||
+              "Shopify rejected the downloads request.",
+          });
+      }
+
+      if (
+        String(
+          error.message
+        ).includes(
+          "SHOPIFY_"
+        )
+      ) {
+        return res
+          .status(500)
+          .json({
+            success: false,
+
+            message:
+              error.message,
+          });
+      }
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+
+          message:
+            shopifyMessage ||
+            error.message ||
+            "Unable to retrieve downloads.",
         });
     }
-
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message:
-          shopifyMessage ||
-          error.message ||
-          "Unable to retrieve downloads.",
-      });
   }
-});
+);
 
 module.exports = router;
