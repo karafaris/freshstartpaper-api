@@ -1,0 +1,17 @@
+◇ injected env (25) from .env // tip: ⌁ auth for agents [www.vestauth.com]
+===== NOTEBOOK CLOUDPRINTER PAYLOAD TEST =====
+
+❌ NOTEBOOK CLOUDPRINTER PAYLOAD TEST FAILED
+Error: Cloudprinter payload product is incorrect
+Expected: "textbook_co_a3_l_fc_ink"
+Received: "textbook_pb_1025x6630_l_fc_ink"
+    at assertEqual (C:\Users\karaf\freshstartpaper-api\scripts\testNotebookCloudprinterPayload.js:38:11)
+    at runTest (C:\Users\karaf\freshstartpaper-api\scripts\testNotebookCloudprinterPayload.js:262:3)
+    at Object.<anonymous> (C:\Users\karaf\freshstartpaper-api\scripts\testNotebookCloudprinterPayload.js:430:3)
+    at Module._compile (node:internal/modules/cjs/loader:1871:14)
+    at Object..js (node:internal/modules/cjs/loader:2002:10)
+    at Module.load (node:internal/modules/cjs/loader:1594:32)
+    at Module._load (node:internal/modules/cjs/loader:1396:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)
+    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+    at node:internal/main/run_main_module:33:47

@@ -1,6 +1,10 @@
 const express = require("express");
+
 const crypto = require("crypto");
+
 const fs = require("fs");
+
+const axios = require("axios");
 
 const {
   generateJournalPDFs,
@@ -22,11 +26,10 @@ const {
 const {
   uploadCalendarPdf,
 } = require("../services/calendarCloudinaryService");
-
 const {
   saveOrderFiles,
+  getOrderFiles,
 } = require("../services/orderFileStore");
-
 const {
   submitCloudprinterOrder,
 } = require("../services/cloudprinterService");
@@ -37,6 +40,802 @@ const {
 
 const router = express.Router();
 
+/*
+|--------------------------------------------------------------------------
+| Manual Shopify order recovery
+|--------------------------------------------------------------------------
+|
+| Used when Render was unavailable when Shopify originally sent the
+| order/create webhook.
+|
+| This retrieves the EXISTING Shopify order and converts Shopify's
+| GraphQL response back into the webhook-style structure expected by
+| the existing PDF generators and Cloudprinter workflow.
+|
+*/
+
+const SHOPIFY_ADMIN_API_VERSION = "2026-07";
+
+let recoveryCachedAccessToken = null;
+let recoveryCachedAccessTokenExpiresAt = 0;
+
+const recoveryOrdersInProgress = new Set();
+
+function recoveryCleanString(
+  value,
+  fallback = ""
+) {
+  if (
+    value === undefined ||
+    value === null
+  ) {
+    return fallback;
+  }
+
+  const cleaned =
+    String(value).trim();
+
+  return cleaned || fallback;
+}
+
+function recoveryNormalizeShopifyStore(
+  store
+) {
+  return recoveryCleanString(store)
+    .replace(
+      /^https?:\/\//i,
+      ""
+    )
+    .replace(
+      /\/+$/,
+      ""
+    );
+}
+
+function recoveryExtractNumericId(
+  gid
+) {
+  const value =
+    recoveryCleanString(gid);
+
+  if (!value) {
+    return null;
+  }
+
+  if (/^\d+$/.test(value)) {
+    return value;
+  }
+
+  const pieces =
+    value.split("/");
+
+  const last =
+    pieces[
+      pieces.length - 1
+    ];
+
+  if (
+    last &&
+    /^\d+$/.test(last)
+  ) {
+    return last;
+  }
+
+  return null;
+}
+
+function recoverySafeSecretEqual(
+  suppliedSecret,
+  expectedSecret
+) {
+  const supplied =
+    recoveryCleanString(
+      suppliedSecret
+    );
+
+  const expected =
+    recoveryCleanString(
+      expectedSecret
+    );
+
+  if (
+    !supplied ||
+    !expected
+  ) {
+    return false;
+  }
+
+  const suppliedBuffer =
+    Buffer.from(
+      supplied,
+      "utf8"
+    );
+
+  const expectedBuffer =
+    Buffer.from(
+      expected,
+      "utf8"
+    );
+
+  if (
+    suppliedBuffer.length !==
+    expectedBuffer.length
+  ) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    suppliedBuffer,
+    expectedBuffer
+  );
+}
+
+async function recoveryGetShopifyAccessToken() {
+  const shopifyStore =
+    recoveryNormalizeShopifyStore(
+      process.env
+        .SHOPIFY_STORE
+    );
+
+  const clientId =
+    recoveryCleanString(
+      process.env
+        .SHOPIFY_CLIENT_ID
+    );
+
+  const clientSecret =
+    recoveryCleanString(
+      process.env
+        .SHOPIFY_CLIENT_SECRET
+    );
+
+  if (!shopifyStore) {
+    throw new Error(
+      "SHOPIFY_STORE is missing from Render."
+    );
+  }
+
+  if (!clientId) {
+    throw new Error(
+      "SHOPIFY_CLIENT_ID is missing from Render."
+    );
+  }
+
+  if (!clientSecret) {
+    throw new Error(
+      "SHOPIFY_CLIENT_SECRET is missing from Render."
+    );
+  }
+
+  const now =
+    Date.now();
+
+  if (
+    recoveryCachedAccessToken &&
+    recoveryCachedAccessTokenExpiresAt >
+      now + 5 * 60 * 1000
+  ) {
+    return recoveryCachedAccessToken;
+  }
+
+  const tokenUrl =
+    `https://${shopifyStore}` +
+    "/admin/oauth/access_token";
+
+  const requestBody =
+    new URLSearchParams({
+      grant_type:
+        "client_credentials",
+
+      client_id:
+        clientId,
+
+      client_secret:
+        clientSecret,
+    });
+
+  console.log(
+    "Recovery: requesting Shopify access token."
+  );
+
+  const response =
+    await axios.post(
+      tokenUrl,
+
+      requestBody.toString(),
+
+      {
+        headers: {
+          "Content-Type":
+            "application/x-www-form-urlencoded",
+
+          Accept:
+            "application/json",
+        },
+
+        timeout:
+          15000,
+      }
+    );
+
+  const accessToken =
+    response.data
+      ?.access_token;
+
+  const expiresInSeconds =
+    Number(
+      response.data
+        ?.expires_in ||
+        86399
+    );
+
+  if (!accessToken) {
+    throw new Error(
+      "Shopify did not return an access token."
+    );
+  }
+
+  recoveryCachedAccessToken =
+    accessToken;
+
+  recoveryCachedAccessTokenExpiresAt =
+    Date.now() +
+    Math.max(
+      expiresInSeconds - 300,
+      60
+    ) *
+      1000;
+
+  console.log(
+    "Recovery: Shopify access token acquired."
+  );
+
+  return recoveryCachedAccessToken;
+}
+
+function recoveryConvertAddress(
+  address
+) {
+  if (!address) {
+    return null;
+  }
+
+  return {
+    first_name:
+      address.firstName ||
+      "",
+
+    last_name:
+      address.lastName ||
+      "",
+
+    company:
+      address.company ||
+      "",
+
+    address1:
+      address.address1 ||
+      "",
+
+    address2:
+      address.address2 ||
+      "",
+
+    city:
+      address.city ||
+      "",
+
+    zip:
+      address.zip ||
+      "",
+
+    province:
+      address.province ||
+      "",
+
+    province_code:
+      address.provinceCode ||
+      "",
+
+    country:
+      address.country ||
+      "",
+
+    country_code:
+      address.countryCodeV2 ||
+      "",
+
+    phone:
+      address.phone ||
+      "",
+  };
+}
+
+function recoveryConvertCustomer(
+  customer
+) {
+  if (!customer) {
+    return null;
+  }
+
+  return {
+    first_name:
+      customer.firstName ||
+      "",
+
+    last_name:
+      customer.lastName ||
+      "",
+
+    email:
+      customer.email ||
+      "",
+
+    phone:
+      customer.phone ||
+      "",
+  };
+}
+
+function recoveryConvertLineItem(
+  item
+) {
+  const itemId =
+    recoveryExtractNumericId(
+      item.id
+    );
+
+  if (!itemId) {
+    throw new Error(
+      `Unable to determine numeric Shopify line-item ID from ${item.id}`
+    );
+  }
+
+  const productId =
+    recoveryExtractNumericId(
+      item.product
+        ?.legacyResourceId
+    );
+
+  const variantId =
+    recoveryExtractNumericId(
+      item.variant
+        ?.legacyResourceId
+    );
+
+  const properties =
+    Array.isArray(
+      item.customAttributes
+    )
+      ? item.customAttributes.map(
+          (attribute) => ({
+            name:
+              attribute.key,
+
+            value:
+              attribute.value,
+          })
+        )
+      : [];
+
+  return {
+    id:
+      itemId,
+
+    product_id:
+      productId,
+
+    variant_id:
+      variantId,
+
+    title:
+      item.title ||
+      item.name ||
+      "Custom Product",
+
+    name:
+      item.name ||
+      item.title ||
+      "Custom Product",
+
+    quantity:
+      Number(
+        item.quantity || 1
+      ),
+
+    sku:
+      item.sku ||
+      "",
+
+    variant_title:
+      item.variantTitle ||
+      "",
+
+    properties,
+  };
+}
+
+function recoveryConvertOrder(
+  graphqlOrder
+) {
+  const orderId =
+    recoveryExtractNumericId(
+      graphqlOrder
+        .legacyResourceId
+    ) ||
+    recoveryExtractNumericId(
+      graphqlOrder.id
+    );
+
+  if (!orderId) {
+    throw new Error(
+      "Unable to determine the numeric Shopify order ID."
+    );
+  }
+
+  const orderName =
+    recoveryCleanString(
+      graphqlOrder.name
+    );
+
+  const orderNumberText =
+    orderName
+      .replace(
+        /^#/,
+        ""
+      )
+      .trim();
+
+  const numericOrderNumber =
+    /^\d+$/.test(
+      orderNumberText
+    )
+      ? Number(
+          orderNumberText
+        )
+      : orderNumberText;
+
+  const graphqlLineItems =
+    graphqlOrder
+      .lineItems
+      ?.nodes;
+
+  if (
+    !Array.isArray(
+      graphqlLineItems
+    ) ||
+    graphqlLineItems.length ===
+      0
+  ) {
+    throw new Error(
+      "The Shopify order does not contain any line items."
+    );
+  }
+
+  const lineItems =
+    graphqlLineItems.map(
+      recoveryConvertLineItem
+    );
+
+  const customer =
+    recoveryConvertCustomer(
+      graphqlOrder.customer
+    );
+
+  const shippingAddress =
+    recoveryConvertAddress(
+      graphqlOrder
+        .shippingAddress
+    );
+
+  const billingAddress =
+    recoveryConvertAddress(
+      graphqlOrder
+        .billingAddress
+    );
+
+  return {
+    id:
+      orderId,
+
+    order_number:
+      numericOrderNumber,
+
+    name:
+      orderName,
+
+    email:
+      graphqlOrder.email ||
+      customer?.email ||
+      "",
+
+    contact_email:
+      graphqlOrder.email ||
+      customer?.email ||
+      "",
+
+    phone:
+      shippingAddress?.phone ||
+      customer?.phone ||
+      "",
+
+    created_at:
+      graphqlOrder.createdAt ||
+      null,
+
+    financial_status:
+      recoveryCleanString(
+        graphqlOrder
+          .displayFinancialStatus
+      ).toLowerCase(),
+
+    fulfillment_status:
+      null,
+
+    customer,
+
+    shipping_address:
+      shippingAddress,
+
+    billing_address:
+      billingAddress,
+
+    line_items:
+      lineItems,
+  };
+}
+
+async function recoveryFindShopifyOrder(
+  orderNumber
+) {
+  const shopifyStore =
+    recoveryNormalizeShopifyStore(
+      process.env
+        .SHOPIFY_STORE
+    );
+
+  const accessToken =
+    await recoveryGetShopifyAccessToken();
+
+  const graphqlUrl =
+    `https://${shopifyStore}` +
+    `/admin/api/${SHOPIFY_ADMIN_API_VERSION}/graphql.json`;
+
+  const query = `
+    query RecoverOrder(
+      $searchQuery: String!
+    ) {
+      orders(
+        first: 10
+        query: $searchQuery
+        sortKey: CREATED_AT
+        reverse: true
+      ) {
+        nodes {
+          id
+          legacyResourceId
+          name
+          email
+          createdAt
+          cancelledAt
+          displayFinancialStatus
+
+          customer {
+            firstName
+            lastName
+            email
+            phone
+          }
+
+          shippingAddress {
+            firstName
+            lastName
+            company
+            address1
+            address2
+            city
+            zip
+            province
+            provinceCode
+            country
+            countryCodeV2
+            phone
+          }
+
+          billingAddress {
+            firstName
+            lastName
+            company
+            address1
+            address2
+            city
+            zip
+            province
+            provinceCode
+            country
+            countryCodeV2
+            phone
+          }
+
+          lineItems(
+            first: 100
+          ) {
+            nodes {
+              id
+              title
+              name
+              quantity
+              sku
+              variantTitle
+
+              customAttributes {
+                key
+                value
+              }
+
+              product {
+                legacyResourceId
+              }
+
+              variant {
+                legacyResourceId
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const normalizedOrderNumber =
+    recoveryCleanString(
+      orderNumber
+    )
+      .replace(
+        /^#/,
+        ""
+      )
+      .trim();
+
+  const searchQuery =
+    `name:#${normalizedOrderNumber}`;
+
+  console.log(
+    "Recovery: searching Shopify for",
+    searchQuery
+  );
+
+  const response =
+    await axios.post(
+      graphqlUrl,
+
+      {
+        query,
+
+        variables: {
+          searchQuery,
+        },
+      },
+
+      {
+        headers: {
+          "X-Shopify-Access-Token":
+            accessToken,
+
+          "Content-Type":
+            "application/json",
+
+          Accept:
+            "application/json",
+        },
+
+        timeout:
+          20000,
+      }
+    );
+
+  if (
+    Array.isArray(
+      response.data?.errors
+    ) &&
+    response.data.errors.length >
+      0
+  ) {
+    const message =
+      response.data.errors
+        .map(
+          (error) =>
+            error.message
+        )
+        .join("; ");
+
+    throw new Error(
+      `Shopify GraphQL error: ${message}`
+    );
+  }
+
+  const orders =
+    response.data
+      ?.data
+      ?.orders
+      ?.nodes;
+
+  if (
+    !Array.isArray(
+      orders
+    )
+  ) {
+    throw new Error(
+      "Shopify did not return an orders array."
+    );
+  }
+
+  const matchingOrder =
+    orders.find(
+      (order) =>
+        recoveryCleanString(
+          order.name
+        )
+          .replace(
+            /^#/,
+            ""
+          )
+          .trim() ===
+        normalizedOrderNumber
+    );
+
+  return (
+    matchingOrder ||
+    null
+  );
+}
+
+async function recoveryFindExistingFiles(
+  order
+) {
+  const existing = [];
+
+  for (
+    const lineItem
+    of order.line_items
+  ) {
+    try {
+      const manifest =
+        await getOrderFiles({
+          orderId:
+            order.id,
+
+          itemId:
+            lineItem.id,
+        });
+
+      if (
+        manifest &&
+        Array.isArray(
+          manifest.files
+        ) &&
+        manifest.files.length >
+          0
+      ) {
+        existing.push({
+          itemId:
+            lineItem.id,
+
+          title:
+            lineItem.title,
+
+          manifest,
+        });
+      }
+    } catch (error) {
+      console.log(
+        `Recovery preflight: no existing manifest for item ${lineItem.id}`
+      );
+    }
+  }
+
+  return existing;
+}
 /*
 |--------------------------------------------------------------------------
 | Verify Shopify webhook
@@ -968,7 +1767,402 @@ async function processOrderInBackground(order) {
     );
   }
 }
+/*
+|--------------------------------------------------------------------------
+| POST /shopify/reprocess
+|--------------------------------------------------------------------------
+|
+| Manually recovers an existing paid Shopify order that was missed while
+| the API was unavailable.
+|
+| This DOES NOT create another Shopify order and DOES NOT charge the
+| customer.
+|
+*/
 
+router.post(
+  "/reprocess",
+
+  express.json({
+    limit: "1mb",
+  }),
+
+  async (req, res) => {
+    try {
+      const expectedSecret =
+        recoveryCleanString(
+          process.env
+            .ORDER_REPROCESS_SECRET
+        );
+
+      if (!expectedSecret) {
+        return res
+          .status(500)
+          .json({
+            success: false,
+
+            message:
+              "ORDER_REPROCESS_SECRET is not configured in Render.",
+          });
+      }
+
+      const suppliedSecret =
+        recoveryCleanString(
+          req.get(
+            "X-Reprocess-Secret"
+          )
+        );
+
+      if (
+        !recoverySafeSecretEqual(
+          suppliedSecret,
+          expectedSecret
+        )
+      ) {
+        return res
+          .status(401)
+          .json({
+            success: false,
+
+            message:
+              "Unauthorized",
+          });
+      }
+
+      const orderNumber =
+        recoveryCleanString(
+          req.body
+            ?.orderNumber
+        )
+          .replace(
+            /^#/,
+            ""
+          )
+          .trim();
+
+      if (!orderNumber) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+
+            message:
+              "orderNumber is required.",
+          });
+      }
+
+      if (
+        recoveryOrdersInProgress.has(
+          orderNumber
+        )
+      ) {
+        return res
+          .status(409)
+          .json({
+            success: false,
+
+            message:
+              `Order #${orderNumber} is already being recovered.`,
+          });
+      }
+
+      console.log(
+        "========================================"
+      );
+
+      console.log(
+        `MANUAL RECOVERY REQUESTED FOR ORDER #${orderNumber}`
+      );
+
+      console.log(
+        "========================================"
+      );
+
+      const graphqlOrder =
+        await recoveryFindShopifyOrder(
+          orderNumber
+        );
+
+      if (!graphqlOrder) {
+        return res
+          .status(404)
+          .json({
+            success: false,
+
+            message:
+              `Shopify order #${orderNumber} was not found.`,
+          });
+      }
+
+      if (
+        graphqlOrder.cancelledAt
+      ) {
+        return res
+          .status(409)
+          .json({
+            success: false,
+
+            message:
+              `Order #${orderNumber} is cancelled in Shopify and will not be reprocessed.`,
+          });
+      }
+
+      const financialStatus =
+        recoveryCleanString(
+          graphqlOrder
+            .displayFinancialStatus
+        ).toUpperCase();
+
+      if (
+        financialStatus !==
+        "PAID"
+      ) {
+        return res
+          .status(409)
+          .json({
+            success: false,
+
+            message:
+              `Order #${orderNumber} is not marked PAID in Shopify. Current status: ${financialStatus || "UNKNOWN"}.`,
+          });
+      }
+
+      const order =
+        recoveryConvertOrder(
+          graphqlOrder
+        );
+
+      console.log(
+        "===== RECOVERED SHOPIFY ORDER ====="
+      );
+
+      console.log({
+        orderId:
+          order.id,
+
+        orderNumber:
+          order.order_number,
+
+        orderName:
+          order.name,
+
+        email:
+          order.email,
+
+        financialStatus:
+          order.financial_status,
+
+        lineItems:
+          order.line_items.length,
+
+        hasShippingAddress:
+          Boolean(
+            order.shipping_address
+          ),
+
+        hasBillingAddress:
+          Boolean(
+            order.billing_address
+          ),
+      });
+
+      order.line_items.forEach(
+        (
+          lineItem,
+          index
+        ) => {
+          console.log(
+            `Recovered product ${index + 1}:`,
+            {
+              id:
+                lineItem.id,
+
+              title:
+                lineItem.title,
+
+              sku:
+                lineItem.sku,
+
+              quantity:
+                lineItem.quantity,
+
+              variantTitle:
+                lineItem
+                  .variant_title,
+
+              propertyCount:
+                lineItem
+                  .properties
+                  .length,
+
+              properties:
+                lineItem
+                  .properties,
+            }
+          );
+        }
+      );
+
+      /*
+       * Prevent accidental duplicate production.
+       *
+       * If generated files already exist, stop rather than sending
+       * another Cloudprinter order.
+       */
+
+      const existingFiles =
+        await recoveryFindExistingFiles(
+          order
+        );
+
+      if (
+        existingFiles.length >
+        0
+      ) {
+        return res
+          .status(409)
+          .json({
+            success: false,
+
+            message:
+              "This order already has generated files. Recovery was stopped to prevent duplicate production.",
+
+            existingItems:
+              existingFiles.map(
+                (entry) => ({
+                  itemId:
+                    entry.itemId,
+
+                  title:
+                    entry.title,
+                })
+              ),
+          });
+      }
+
+      recoveryOrdersInProgress.add(
+        orderNumber
+      );
+
+      /*
+       * Acknowledge the recovery request before generating large PDFs.
+       */
+
+      res
+        .status(202)
+        .json({
+          success: true,
+
+          message:
+            `Order #${orderNumber} was found, verified as paid, and accepted for recovery.`,
+
+          orderId:
+            order.id,
+
+          orderNumber:
+            order.order_number,
+
+          lineItemCount:
+            order.line_items
+              .length,
+
+          nextStep:
+            "Watch the Render logs for generation, Cloudinary upload, manifest creation and Cloudprinter submission.",
+        });
+
+      setImmediate(
+        () => {
+          processOrderInBackground(
+            order
+          )
+            .then(
+              () => {
+                console.log(
+                  "========================================"
+                );
+
+                console.log(
+                  `✅ MANUAL RECOVERY COMPLETE FOR ORDER #${orderNumber}`
+                );
+
+                console.log(
+                  "========================================"
+                );
+              }
+            )
+            .catch(
+              (error) => {
+                console.error(
+                  "========================================"
+                );
+
+                console.error(
+                  `❌ MANUAL RECOVERY FAILED FOR ORDER #${orderNumber}`
+                );
+
+                console.error({
+                  message:
+                    error.message,
+
+                  stack:
+                    error.stack,
+                });
+
+                console.error(
+                  "========================================"
+                );
+              }
+            )
+            .finally(
+              () => {
+                recoveryOrdersInProgress.delete(
+                  orderNumber
+                );
+              }
+            );
+        }
+      );
+
+      return;
+    } catch (error) {
+      console.error(
+        "Manual Shopify order recovery failed"
+      );
+
+      console.error({
+        message:
+          error.message,
+
+        responseStatus:
+          error.response
+            ?.status,
+
+        responseData:
+          error.response
+            ?.data,
+
+        stack:
+          error.stack,
+      });
+
+      if (
+        !res.headersSent
+      ) {
+        return res
+          .status(500)
+          .json({
+            success: false,
+
+            message:
+              error.message ||
+              "Unable to recover Shopify order.",
+          });
+      }
+
+      return;
+    }
+  }
+);
 /*
 |--------------------------------------------------------------------------
 | POST /shopify/order
