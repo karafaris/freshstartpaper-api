@@ -1,3 +1,27 @@
+
+"use strict";
+
+/*
+ * Fresh Start Paper — Shopify Order Routes
+ *
+ * Fulfillment provider: Lulu Print API
+ *
+ * Preserves:
+ * - Shopify HMAC verification
+ * - Custom journal PDF generation
+ * - Custom notebook PDF generation
+ * - Cloudinary uploads
+ * - Download manifests
+ * - Manual paid-order recovery
+ *
+ * Calendars remain blocked from Lulu fulfillment
+ * until Lulu-compatible print files are available.
+ *
+ * Important:
+ * LULU_ENABLED must remain false until testing
+ * and print specifications are verified.
+ */
+
 const express = require("express");
 const crypto = require("crypto");
 const fs = require("fs");
@@ -6,10 +30,6 @@ const axios = require("axios");
 const {
   generateJournalPDFs,
 } = require("../services/pdfGenerator");
-
-const {
-  generateCalendarPDFs,
-} = require("../services/calendarPdfGenerator");
 
 const {
   generateNotebookPDFs,
@@ -21,17 +41,13 @@ const {
 } = require("../services/cloudinaryService");
 
 const {
-  uploadCalendarPdf,
-} = require("../services/calendarCloudinaryService");
-
-const {
   saveOrderFiles,
   getOrderFiles,
 } = require("../services/orderFileStore");
 
 const {
-  submitCloudprinterOrder,
-} = require("../services/cloudprinterService");
+  submitLuluOrder,
+} = require("../services/luluService");
 
 const {
   resolveProduct,
@@ -39,740 +55,870 @@ const {
 
 const router = express.Router();
 
-const SHOPIFY_ADMIN_API_VERSION =
-  "2026-07";
+const SHOPIFY_ADMIN_API_VERSION = "2026-07";
 
-let recoveryCachedAccessToken = null;
+let recoveryToken = null;
+let recoveryTokenExpiresAt = 0;
 
-let recoveryCachedAccessTokenExpiresAt =
-  0;
-
-const recoveryOrdersInProgress =
-  new Set();
+const ordersInProgress = new Set();
 
 /*
-|--------------------------------------------------------------------------
-| General helpers
-|--------------------------------------------------------------------------
-*/
+ * --------------------------------------------------
+ * GENERAL HELPERS
+ * --------------------------------------------------
+ */
 
-function cleanString(
-  value,
-  fallback = ""
-) {
-  if (
-    value === undefined ||
-    value === null
-  ) {
-    return fallback;
-  }
-
-  const cleaned =
-    String(value).trim();
-
-  return cleaned || fallback;
+function clean(value, fallback = "") {
+  const result = String(value ?? "").trim();
+  return result || fallback;
 }
 
-function normalizeShopifyStore(
-  store
-) {
-  return cleanString(store)
-    .replace(
-      /^https?:\/\//i,
-      ""
-    )
-    .replace(
-      /\/+$/,
-      ""
-    );
+function normalizeStore(value) {
+  return clean(value)
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/+$/, "");
 }
 
-function extractNumericId(
-  value
-) {
-  const cleaned =
-    cleanString(value);
+function numericId(value) {
+  const result = clean(value).split("/").pop();
 
-  if (!cleaned) {
-    return null;
+  if (!/^\d+$/.test(result)) {
+    throw new Error(
+      `Invalid Shopify numeric ID: ${value}`
+    );
   }
 
-  if (/^\d+$/.test(cleaned)) {
-    return cleaned;
-  }
-
-  const pieces =
-    cleaned.split("/");
-
-  const last =
-    pieces[
-      pieces.length - 1
-    ];
-
-  if (
-    last &&
-    /^\d+$/.test(last)
-  ) {
-    return last;
-  }
-
-  return null;
+  return result;
 }
 
-function safeSecretEqual(
-  suppliedSecret,
-  expectedSecret
-) {
-  const supplied =
-    cleanString(
-      suppliedSecret
-    );
-
-  const expected =
-    cleanString(
-      expectedSecret
-    );
-
-  if (
-    !supplied ||
-    !expected
-  ) {
+function safeEqual(a, b) {
+  if (!a || !b) {
     return false;
   }
 
-  const suppliedBuffer =
-    Buffer.from(
-      supplied,
-      "utf8"
-    );
+  const first = Buffer.from(String(a));
+  const second = Buffer.from(String(b));
 
-  const expectedBuffer =
-    Buffer.from(
-      expected,
-      "utf8"
-    );
-
-  if (
-    suppliedBuffer.length !==
-    expectedBuffer.length
-  ) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(
-    suppliedBuffer,
-    expectedBuffer
-  );
+  return first.length === second.length &&
+    crypto.timingSafeEqual(first, second);
 }
 
-/*
-|--------------------------------------------------------------------------
-| Verify Shopify webhook
-|--------------------------------------------------------------------------
-*/
-
-function verifyShopifyWebhook({
+function verifyShopifyWebhook(
   rawBody,
-  receivedHmac,
-  webhookSecret,
-}) {
-  if (
-    !Buffer.isBuffer(
-      rawBody
-    )
-  ) {
+  hmac,
+  secret
+) {
+  if (!Buffer.isBuffer(rawBody)) {
     return false;
   }
 
-  if (
-    !receivedHmac ||
-    !webhookSecret
-  ) {
+  if (!hmac || !secret) {
     return false;
   }
 
-  const calculatedHmac =
-    crypto
-      .createHmac(
-        "sha256",
-        webhookSecret
-      )
-      .update(
-        rawBody
-      )
-      .digest(
-        "base64"
-      );
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(rawBody)
+    .digest("base64");
 
-  let receivedBuffer;
-
-  let calculatedBuffer;
-
-  try {
-    receivedBuffer =
-      Buffer.from(
-        receivedHmac,
-        "base64"
-      );
-
-    calculatedBuffer =
-      Buffer.from(
-        calculatedHmac,
-        "base64"
-      );
-  } catch (error) {
-    console.error(
-      "Unable to convert Shopify HMAC values to buffers",
-      error
-    );
-
-    return false;
-  }
-
-  if (
-    receivedBuffer.length !==
-    calculatedBuffer.length
-  ) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(
-    receivedBuffer,
-    calculatedBuffer
-  );
+  return safeEqual(hmac, expected);
 }
 
-/*
-|--------------------------------------------------------------------------
-| Validate line item
-|--------------------------------------------------------------------------
-*/
-
-function isValidLineItem(
-  lineItem
-) {
+function isValidLineItem(item) {
   return Boolean(
-    lineItem &&
-      lineItem.id &&
-      Number(
-        lineItem.quantity ||
-        0
-      ) > 0
+    item &&
+    item.id &&
+    Number(item.quantity) > 0
   );
 }
 
-/*
-|--------------------------------------------------------------------------
-| Delete temporary calendar PDF
-|--------------------------------------------------------------------------
-*/
+function orderNumberOf(order) {
+  return (
+    order.order_number ||
+    order.name ||
+    order.id
+  );
+}
 
-async function deleteCalendarLocalFile(
-  productPath
-) {
-  if (!productPath) {
-    return;
+function isPaid(order) {
+  return clean(
+    order.financial_status
+  ).toLowerCase() === "paid";
+}
+
+/*
+ * --------------------------------------------------
+ * PRODUCT RESOLUTION
+ * --------------------------------------------------
+ */
+
+function getProductConfiguration(lineItem) {
+  const configuration = resolveProduct(lineItem);
+
+  if (!configuration?.kind) {
+    throw new Error(
+      `Unable to resolve product: ${lineItem.title}`
+    );
   }
 
-  try {
-    await fs.promises.unlink(
-      productPath
+  if (
+    !["journal", "notebook", "calendar"]
+      .includes(configuration.kind)
+  ) {
+    throw new Error(
+      `Unsupported product: ${configuration.kind}`
     );
-  } catch (error) {
+  }
+
+  return configuration;
+}
+
+/*
+ * --------------------------------------------------
+ * EXISTING MANIFEST LOOKUP
+ * --------------------------------------------------
+ */
+
+async function existingManifest(orderId, itemId) {
+  try {
+    const manifest = await getOrderFiles({
+      orderId,
+      itemId,
+    });
+
     if (
-      error.code !==
-      "ENOENT"
+      manifest &&
+      Array.isArray(manifest.files) &&
+      manifest.files.length > 0
     ) {
-      throw error;
+      return manifest;
+    }
+
+    return null;
+  } catch (error) {
+    console.log(
+      "Manifest lookup unavailable:",
+      error.message
+    );
+
+    // Fail closed for recovery: an unavailable
+    // manifest store cannot prove that an
+    // order has not already been processed.
+    throw error;
+  }
+}
+
+async function findExistingOrderFiles(order) {
+  const matches = [];
+
+  for (const item of order.line_items || []) {
+    const manifest = await existingManifest(
+      order.id,
+      item.id
+    );
+
+    if (manifest) {
+      matches.push({
+        itemId: item.id,
+        title: item.title,
+        manifest,
+      });
+    }
+  }
+
+  return matches;
+}
+
+/*
+ * --------------------------------------------------
+ * PDF UPLOAD VALIDATION
+ * --------------------------------------------------
+ */
+
+function validateUploadedFiles(files, kind) {
+  for (const type of ["interior", "cover"]) {
+    const file = files?.[type];
+
+    if (!file?.url) {
+      throw new Error(
+        `${kind}: missing ${type} Cloudinary URL`
+      );
+    }
+
+    if (
+      !/^[a-f0-9]{32}$/i.test(
+        clean(file.md5sum)
+      )
+    ) {
+      throw new Error(
+        `${kind}: invalid ${type} PDF MD5`
+      );
+    }
+
+    if (
+      !/^https:\/\//i.test(file.url)
+    ) {
+      throw new Error(
+        `${kind}: ${type} URL must use HTTPS`
+      );
     }
   }
 }
 
 /*
-|--------------------------------------------------------------------------
-| Recovery Shopify access token
-|--------------------------------------------------------------------------
-*/
+ * --------------------------------------------------
+ * LULU SAFETY CHECKS
+ * --------------------------------------------------
+ */
 
-async function getRecoveryShopifyAccessToken() {
-  const shopifyStore =
-    normalizeShopifyStore(
-      process.env
-        .SHOPIFY_STORE
-    );
-
-  const clientId =
-    cleanString(
-      process.env
-        .SHOPIFY_CLIENT_ID
-    );
-
-  const clientSecret =
-    cleanString(
-      process.env
-        .SHOPIFY_CLIENT_SECRET
-    );
-
-  if (!shopifyStore) {
-    throw new Error(
-      "SHOPIFY_STORE is missing from Render."
-    );
-  }
-
-  if (!clientId) {
-    throw new Error(
-      "SHOPIFY_CLIENT_ID is missing from Render."
-    );
-  }
-
-  if (!clientSecret) {
-    throw new Error(
-      "SHOPIFY_CLIENT_SECRET is missing from Render."
-    );
-  }
-
-  const now =
-    Date.now();
-
+function verifyLuluConfiguration(kind) {
   if (
-    recoveryCachedAccessToken &&
-    recoveryCachedAccessTokenExpiresAt >
-      now +
-      5 *
-        60 *
-        1000
+    process.env.LULU_ENABLED !== "true"
   ) {
-    return recoveryCachedAccessToken;
-  }
-
-  const tokenUrl =
-    `https://${shopifyStore}` +
-    "/admin/oauth/access_token";
-
-  const requestBody =
-    new URLSearchParams({
-      grant_type:
-        "client_credentials",
-
-      client_id:
-        clientId,
-
-      client_secret:
-        clientSecret,
-    });
-
-  console.log(
-    "Recovery: requesting Shopify access token."
-  );
-
-  const response =
-    await axios.post(
-      tokenUrl,
-
-      requestBody.toString(),
-
-      {
-        headers: {
-          "Content-Type":
-            "application/x-www-form-urlencoded",
-
-          Accept:
-            "application/json",
-        },
-
-        timeout:
-          15000,
-      }
-    );
-
-  const accessToken =
-    response.data
-      ?.access_token;
-
-  const expiresInSeconds =
-    Number(
-      response.data
-        ?.expires_in ||
-      86399
-    );
-
-  if (!accessToken) {
     throw new Error(
-      "Shopify did not return an access token."
+      "Lulu fulfillment is disabled. " +
+      "Set LULU_ENABLED=true only after testing."
     );
   }
 
-  recoveryCachedAccessToken =
-    accessToken;
+  if (kind === "calendar") {
+    throw new Error(
+      "Calendar Lulu submission blocked. " +
+      "The current 13-page calendar uses a " +
+      "single PDF and requires conversion."
+    );
+  }
 
-  recoveryCachedAccessTokenExpiresAt =
-    Date.now() +
-    Math.max(
-      expiresInSeconds -
-        300,
-      60
-    ) *
-      1000;
+  const variable =
+    kind === "journal"
+      ? "LULU_JOURNAL_PACKAGE_ID"
+      : "LULU_NOTEBOOK_PACKAGE_ID";
 
-  console.log(
-    "Recovery: Shopify access token acquired."
-  );
-
-  return recoveryCachedAccessToken;
+  if (!process.env[variable]) {
+    throw new Error(
+      `${variable} is missing from Render.`
+    );
+  }
 }
 
 /*
-|--------------------------------------------------------------------------
-| Convert Shopify GraphQL address into webhook-style address
-|--------------------------------------------------------------------------
-*/
+ * --------------------------------------------------
+ * PROCESS JOURNAL
+ * --------------------------------------------------
+ */
 
-function convertGraphqlAddress(
-  address
-) {
+async function processJournalLineItem({
+  order,
+  lineItem,
+  productConfiguration,
+}) {
+  const orderId = order.id;
+  const itemId = lineItem.id;
+
+  let generatedFiles = null;
+
+  try {
+    verifyLuluConfiguration("journal");
+
+    console.log(
+      "===== JOURNAL GENERATION STARTED =====",
+      { orderId, itemId }
+    );
+
+    generatedFiles = await generateJournalPDFs(
+      order,
+      lineItem
+    );
+
+    if (
+      !generatedFiles?.interiorPath ||
+      !generatedFiles?.coverPath
+    ) {
+      throw new Error(
+        "Journal generator did not produce " +
+        "both interior and cover files."
+      );
+    }
+
+    const uploadedFiles =
+      await uploadGeneratedPDFs({
+        interiorPath: generatedFiles.interiorPath,
+        coverPath: generatedFiles.coverPath,
+        orderId,
+        itemId,
+      });
+
+    validateUploadedFiles(
+      uploadedFiles,
+      "journal"
+    );
+
+    const storedFiles = await saveOrderFiles({
+      orderId,
+      orderNumber: orderNumberOf(order),
+      itemId,
+      files: [
+        uploadedFiles.interior,
+        uploadedFiles.cover,
+      ],
+    });
+
+    if (!storedFiles?.manifestUrl) {
+      throw new Error(
+        "Journal manifest was not saved."
+      );
+    }
+
+    console.log(
+      "===== JOURNAL LULU SUBMISSION =====",
+      { orderId, itemId }
+    );
+
+    const luluResult = await submitLuluOrder({
+      order,
+      lineItem,
+      uploadedFiles,
+      productKind: "journal",
+      productConfiguration,
+    });
+
+    if (!luluResult?.id) {
+      throw new Error(
+        "Lulu did not return a journal print-job ID."
+      );
+    }
+
+    return {
+      success: true,
+      productKind: "journal",
+      itemId,
+      title: lineItem.title,
+      quantity: lineItem.quantity,
+      totalPages: productConfiguration.totalPages,
+      manifestUrl: storedFiles.manifestUrl,
+      luluJobId: luluResult.id,
+      luluLineItemId: String(itemId),
+      luluStatus:
+        luluResult.status?.name ||
+        luluResult.status ||
+        "CREATED",
+    };
+  } finally {
+    if (generatedFiles) {
+      await deleteGeneratedLocalFiles({
+        interiorPath:
+          generatedFiles.interiorPath,
+        coverPath:
+          generatedFiles.coverPath,
+      });
+    }
+  }
+}
+
+/*
+ * --------------------------------------------------
+ * PROCESS NOTEBOOK
+ * --------------------------------------------------
+ */
+
+async function processNotebookLineItem({
+  order,
+  lineItem,
+  productConfiguration,
+}) {
+  const orderId = order.id;
+  const itemId = lineItem.id;
+
+  let generatedFiles = null;
+
+  try {
+    verifyLuluConfiguration("notebook");
+
+    console.log(
+      "===== NOTEBOOK GENERATION STARTED =====",
+      { orderId, itemId }
+    );
+
+    generatedFiles = await generateNotebookPDFs(
+      order,
+      lineItem
+    );
+
+    if (
+      !generatedFiles?.interiorPath ||
+      !generatedFiles?.coverPath
+    ) {
+      throw new Error(
+        "Notebook generator did not produce " +
+        "both interior and cover files."
+      );
+    }
+
+    if (
+      Number(generatedFiles.totalPages) !==
+      Number(productConfiguration.totalPages)
+    ) {
+      throw new Error(
+        `Notebook generated ${generatedFiles.totalPages} ` +
+        `pages; expected ${productConfiguration.totalPages}.`
+      );
+    }
+
+    if (
+      Number(generatedFiles.coverPages) !== 2
+    ) {
+      throw new Error(
+        "Notebook generator did not report " +
+        "the expected 2 cover pages."
+      );
+    }
+
+    const uploadedFiles =
+      await uploadGeneratedPDFs({
+        interiorPath: generatedFiles.interiorPath,
+        coverPath: generatedFiles.coverPath,
+        orderId,
+        itemId,
+      });
+
+    validateUploadedFiles(
+      uploadedFiles,
+      "notebook"
+    );
+
+    const storedFiles = await saveOrderFiles({
+      orderId,
+      orderNumber: orderNumberOf(order),
+      itemId,
+      files: [
+        uploadedFiles.interior,
+        uploadedFiles.cover,
+      ],
+    });
+
+    if (!storedFiles?.manifestUrl) {
+      throw new Error(
+        "Notebook manifest was not saved."
+      );
+    }
+
+    const luluResult = await submitLuluOrder({
+      order,
+      lineItem,
+      uploadedFiles,
+      productKind: "notebook",
+      productConfiguration,
+    });
+
+    if (!luluResult?.id) {
+      throw new Error(
+        "Lulu did not return a notebook print-job ID."
+      );
+    }
+
+    return {
+      success: true,
+      productKind: "notebook",
+      itemId,
+      title: lineItem.title,
+      quantity: lineItem.quantity,
+      totalPages: productConfiguration.totalPages,
+      coverPages: generatedFiles.coverPages,
+      manifestUrl: storedFiles.manifestUrl,
+      luluJobId: luluResult.id,
+      luluLineItemId: String(itemId),
+      luluStatus:
+        luluResult.status?.name ||
+        luluResult.status ||
+        "CREATED",
+    };
+  } finally {
+    if (generatedFiles) {
+      await deleteGeneratedLocalFiles({
+        interiorPath:
+          generatedFiles.interiorPath,
+        coverPath:
+          generatedFiles.coverPath,
+      });
+    }
+  }
+}
+
+/*
+ * --------------------------------------------------
+ * PROCESS CALENDAR
+ * --------------------------------------------------
+ */
+
+async function processCalendarLineItem() {
+  throw new Error(
+    "Calendar Lulu fulfillment is not ready. " +
+    "Its existing single PDF must be converted " +
+    "to Lulu-compatible cover and interior files."
+  );
+}
+
+/*
+ * --------------------------------------------------
+ * PROCESS INDIVIDUAL LINE ITEM
+ * --------------------------------------------------
+ */
+
+async function processLineItem({
+  order,
+  lineItem,
+  lineItemIndex,
+  totalLineItems,
+}) {
+  let kind = "unknown";
+
+  try {
+    const productConfiguration =
+      getProductConfiguration(lineItem);
+
+    kind = productConfiguration.kind;
+
+    console.log(
+      `Processing item ${lineItemIndex + 1} ` +
+      `of ${totalLineItems}`,
+      {
+        orderId: order.id,
+        itemId: lineItem.id,
+        kind,
+        sku: lineItem.sku,
+      }
+    );
+
+    if (kind === "journal") {
+      return await processJournalLineItem({
+        order,
+        lineItem,
+        productConfiguration,
+      });
+    }
+
+    if (kind === "notebook") {
+      return await processNotebookLineItem({
+        order,
+        lineItem,
+        productConfiguration,
+      });
+    }
+
+    if (kind === "calendar") {
+      return await processCalendarLineItem({
+        order,
+        lineItem,
+        productConfiguration,
+      });
+    }
+
+    throw new Error(
+      `Unsupported product kind: ${kind}`
+    );
+  } catch (error) {
+    console.error(
+      "LINE ITEM FAILED",
+      {
+        orderId: order.id,
+        itemId: lineItem.id,
+        kind,
+        message: error.message,
+        stack: error.stack,
+      }
+    );
+
+    return {
+      success: false,
+      productKind: kind,
+      itemId: lineItem.id,
+      title: lineItem.title,
+      quantity: lineItem.quantity,
+      error: error.message,
+    };
+  }
+}
+
+/*
+ * --------------------------------------------------
+ * PROCESS COMPLETE SHOPIFY ORDER
+ * --------------------------------------------------
+ */
+
+async function processOrderInBackground(order) {
+  const orderId = order.id;
+  const orderNumber = orderNumberOf(order);
+
+  if (
+    !orderId ||
+    !Array.isArray(order.line_items)
+  ) {
+    throw new Error(
+      "Invalid Shopify order payload."
+    );
+  }
+
+  if (!isPaid(order)) {
+    throw new Error(
+      `Order ${orderNumber} is not marked PAID.`
+    );
+  }
+
+  const lockKey = String(orderId);
+
+  if (ordersInProgress.has(lockKey)) {
+    throw new Error(
+      `Order ${orderNumber} is already processing.`
+    );
+  }
+
+  ordersInProgress.add(lockKey);
+
+  try {
+    const validItems =
+      order.line_items.filter(isValidLineItem);
+
+    if (!validItems.length) {
+      throw new Error(
+        "No valid order line items."
+      );
+    }
+
+    const results = [];
+
+    // Sequential processing protects Render memory.
+    for (
+      let index = 0;
+      index < validItems.length;
+      index += 1
+    ) {
+      const lineItem = validItems[index];
+
+      const result = await processLineItem({
+        order,
+        lineItem,
+        lineItemIndex: index,
+        totalLineItems: validItems.length,
+      });
+
+      results.push(result);
+    }
+
+    const successfulItems =
+      results.filter(item => item.success);
+
+    const failedItems =
+      results.filter(item => !item.success);
+
+    console.log(
+      "===== LULU ORDER SUMMARY =====",
+      {
+        orderId,
+        orderNumber,
+        successful: successfulItems.length,
+        failed: failedItems.length,
+        results,
+      }
+    );
+
+    return {
+      results,
+      successfulItems,
+      failedItems,
+      allSucceeded: failedItems.length === 0,
+    };
+  } finally {
+    ordersInProgress.delete(lockKey);
+  }
+}
+
+/*
+ * --------------------------------------------------
+ * SHOPIFY RECOVERY ACCESS TOKEN
+ * --------------------------------------------------
+ */
+
+async function getRecoveryShopifyAccessToken() {
+  if (
+    recoveryToken &&
+    Date.now() < recoveryTokenExpiresAt
+  ) {
+    return recoveryToken;
+  }
+
+  const store = normalizeStore(
+    process.env.SHOPIFY_STORE
+  );
+
+  const clientId = clean(
+    process.env.SHOPIFY_CLIENT_ID
+  );
+
+  const clientSecret = clean(
+    process.env.SHOPIFY_CLIENT_SECRET
+  );
+
+  if (!store || !clientId || !clientSecret) {
+    throw new Error(
+      "Shopify recovery credentials are missing."
+    );
+  }
+
+  const response = await axios.post(
+    `https://${store}/admin/oauth/access_token`,
+    new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: clientId,
+      client_secret: clientSecret,
+    }).toString(),
+    {
+      headers: {
+        "Content-Type":
+          "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      timeout: 15000,
+    }
+  );
+
+  recoveryToken = response.data?.access_token;
+
+  if (!recoveryToken) {
+    throw new Error(
+      "Shopify did not issue an access token."
+    );
+  }
+
+  const expiresIn = Number(
+    response.data?.expires_in || 86399
+  );
+
+  recoveryTokenExpiresAt =
+    Date.now() +
+    Math.max(expiresIn - 300, 60) * 1000;
+
+  return recoveryToken;
+}
+
+/*
+ * --------------------------------------------------
+ * SHOPIFY GRAPHQL CONVERSION
+ * --------------------------------------------------
+ */
+
+function convertGraphqlAddress(address) {
   if (!address) {
     return null;
   }
 
   return {
-    first_name:
-      address.firstName ||
-      "",
-
-    last_name:
-      address.lastName ||
-      "",
-
-    company:
-      address.company ||
-      "",
-
-    address1:
-      address.address1 ||
-      "",
-
-    address2:
-      address.address2 ||
-      "",
-
-    city:
-      address.city ||
-      "",
-
-    zip:
-      address.zip ||
-      "",
-
-    province:
-      address.province ||
-      "",
-
-    province_code:
-      address.provinceCode ||
-      "",
-
-    country:
-      address.country ||
-      "",
-
-    country_code:
-      address.countryCodeV2 ||
-      "",
-
-    phone:
-      address.phone ||
-      "",
+    first_name: address.firstName || "",
+    last_name: address.lastName || "",
+    company: address.company || "",
+    address1: address.address1 || "",
+    address2: address.address2 || "",
+    city: address.city || "",
+    zip: address.zip || "",
+    province: address.province || "",
+    province_code: address.provinceCode || "",
+    country: address.country || "",
+    country_code: address.countryCodeV2 || "",
+    phone: address.phone || "",
   };
 }
 
-/*
-|--------------------------------------------------------------------------
-| Convert GraphQL line item into webhook-style line item
-|--------------------------------------------------------------------------
-*/
-
-function convertGraphqlLineItem(
-  item
-) {
-  const itemId =
-    extractNumericId(
-      item.id
-    );
-
-  if (!itemId) {
-    throw new Error(
-      `Unable to determine numeric Shopify line-item ID from ${item.id}`
-    );
-  }
-
-  const properties =
-    Array.isArray(
-      item.customAttributes
-    )
-      ? item.customAttributes.map(
-          (
-            attribute
-          ) => ({
-            name:
-              attribute.key,
-
-            value:
-              attribute.value,
-          })
-        )
-      : [];
-
+function convertGraphqlLineItem(item) {
   return {
-    id:
-      itemId,
-
-    /*
-     * Not needed for generation or Cloudprinter recovery.
-     * Leaving these null avoids requiring extra Shopify product scopes.
-     */
-
-    product_id:
-      null,
-
-    variant_id:
-      null,
-
-    title:
-      item.title ||
-      item.name ||
-      "Custom Product",
-
-    name:
-      item.name ||
-      item.title ||
-      "Custom Product",
-
-    quantity:
-      Number(
-        item.quantity ||
-        1
-      ),
-
-    sku:
-      item.sku ||
-      "",
-
-    variant_title:
-      item.variantTitle ||
-      "",
-
-    properties,
+    id: numericId(item.id),
+    product_id: null,
+    variant_id: null,
+    title: item.title || item.name,
+    name: item.name || item.title,
+    quantity: Number(item.quantity || 1),
+    sku: item.sku || "",
+    variant_title: item.variantTitle || "",
+    properties: (item.customAttributes || [])
+      .map(attribute => ({
+        name: attribute.key,
+        value: attribute.value,
+      })),
   };
 }
 
-/*
-|--------------------------------------------------------------------------
-| Convert GraphQL order into webhook-style order
-|--------------------------------------------------------------------------
-*/
-
-function convertGraphqlOrder(
-  graphqlOrder
-) {
-  const orderId =
-    extractNumericId(
-      graphqlOrder
-        .legacyResourceId
-    ) ||
-    extractNumericId(
-      graphqlOrder.id
-    );
-
-  if (!orderId) {
-    throw new Error(
-      "Unable to determine the numeric Shopify order ID."
-    );
-  }
-
-  const orderName =
-    cleanString(
-      graphqlOrder.name
-    );
-
-  const orderNumberText =
-    orderName
-      .replace(
-        /^#/,
-        ""
-      )
-      .trim();
-
-  const orderNumber =
-    /^\d+$/.test(
-      orderNumberText
-    )
-      ? Number(
-          orderNumberText
-        )
-      : orderNumberText;
-
-  const graphqlLineItems =
-    graphqlOrder
-      .lineItems
-      ?.nodes;
-
-  if (
-    !Array.isArray(
-      graphqlLineItems
-    ) ||
-    graphqlLineItems.length ===
-      0
-  ) {
-    throw new Error(
-      "The Shopify order does not contain any line items."
-    );
-  }
-
-  const lineItems =
-    graphqlLineItems.map(
-      convertGraphqlLineItem
-    );
-
+function convertGraphqlOrder(data) {
   const shippingAddress =
-    convertGraphqlAddress(
-      graphqlOrder
-        .shippingAddress
-    );
+    convertGraphqlAddress(data.shippingAddress);
 
   const billingAddress =
-    convertGraphqlAddress(
-      graphqlOrder
-        .billingAddress
-    );
+    convertGraphqlAddress(data.billingAddress);
 
-  const sourceAddress =
-    shippingAddress ||
-    billingAddress ||
-    null;
+  const address =
+    shippingAddress || billingAddress;
 
-  /*
-   * IMPORTANT:
-   *
-   * We intentionally DO NOT query Shopify's Customer object.
-   *
-   * Shopify requires read_customers permission for that object.
-   *
-   * The journal generator only uses customer first/last name as a
-   * fallback, so we rebuild that information from the order address.
-   */
-
-  const customer =
-    sourceAddress
-      ? {
-          first_name:
-            sourceAddress
-              .first_name ||
-            "",
-
-          last_name:
-            sourceAddress
-              .last_name ||
-            "",
-
-          email:
-            graphqlOrder.email ||
-            "",
-
-          phone:
-            shippingAddress
-              ?.phone ||
-            billingAddress
-              ?.phone ||
-            "",
-        }
-      : null;
+  const orderName = clean(data.name);
 
   return {
-    id:
-      orderId,
+    id: numericId(
+      data.legacyResourceId || data.id
+    ),
+
+    name: orderName,
 
     order_number:
-      orderNumber,
+      orderName.replace(/^#/, ""),
 
-    name:
-      orderName,
+    email: data.email || "",
+    contact_email: data.email || "",
 
-    email:
-      graphqlOrder.email ||
-      "",
-
-    contact_email:
-      graphqlOrder.email ||
-      "",
-
-    phone:
-      shippingAddress
-        ?.phone ||
-      billingAddress
-        ?.phone ||
-      "",
-
-    created_at:
-      graphqlOrder
-        .createdAt ||
-      null,
+    created_at: data.createdAt || null,
 
     financial_status:
-      cleanString(
-        graphqlOrder
-          .displayFinancialStatus
-      ).toLowerCase(),
+      clean(data.displayFinancialStatus)
+        .toLowerCase(),
 
-    fulfillment_status:
-      null,
+    fulfillment_status: null,
 
-    customer,
+    shipping_address: shippingAddress,
+    billing_address: billingAddress,
 
-    shipping_address:
-      shippingAddress,
+    phone:
+      shippingAddress?.phone ||
+      billingAddress?.phone ||
+      "",
 
-    billing_address:
-      billingAddress,
+    customer: address
+      ? {
+          first_name: address.first_name,
+          last_name: address.last_name,
+          email: data.email || "",
+          phone: address.phone || "",
+        }
+      : null,
 
     line_items:
-      lineItems,
+      (data.lineItems?.nodes || [])
+        .map(convertGraphqlLineItem),
   };
 }
 
 /*
-|--------------------------------------------------------------------------
-| Find Shopify order for recovery
-|--------------------------------------------------------------------------
-*/
+ * --------------------------------------------------
+ * LOOK UP AN EXISTING SHOPIFY ORDER
+ * --------------------------------------------------
+ */
 
 async function findShopifyOrderForRecovery(
   orderNumber
 ) {
-  const shopifyStore =
-    normalizeShopifyStore(
-      process.env
-        .SHOPIFY_STORE
-    );
+  const store = normalizeStore(
+    process.env.SHOPIFY_STORE
+  );
 
-  const accessToken =
+  const token =
     await getRecoveryShopifyAccessToken();
 
-  const graphqlUrl =
-    `https://${shopifyStore}` +
-    `/admin/api/${SHOPIFY_ADMIN_API_VERSION}/graphql.json`;
-
-  /*
-   * IMPORTANT:
-   *
-   * No customer { } query here.
-   *
-   * That avoids requiring the read_customers scope.
-   */
-
   const query = `
-    query RecoverOrder(
-      $searchQuery: String!
-    ) {
+    query RecoverOrder($searchQuery: String!) {
       orders(
         first: 10
         query: $searchQuery
@@ -818,9 +964,7 @@ async function findShopifyOrderForRecovery(
             phone
           }
 
-          lineItems(
-            first: 100
-          ) {
+          lineItems(first: 100) {
             nodes {
               id
               title
@@ -840,2071 +984,360 @@ async function findShopifyOrderForRecovery(
     }
   `;
 
-  const normalizedOrderNumber =
-    cleanString(
-      orderNumber
-    )
-      .replace(
-        /^#/,
-        ""
-      )
-      .trim();
+  const normalized = clean(orderNumber)
+    .replace(/^#/, "");
 
-  const searchQuery =
-    `name:#${normalizedOrderNumber}`;
-
-  console.log(
-    "Recovery: searching Shopify for",
-    searchQuery
+  const response = await axios.post(
+    `https://${store}/admin/api/${SHOPIFY_ADMIN_API_VERSION}/graphql.json`,
+    {
+      query,
+      variables: {
+        searchQuery: `name:#${normalized}`,
+      },
+    },
+    {
+      headers: {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+      },
+      timeout: 20000,
+    }
   );
 
-  const response =
-    await axios.post(
-      graphqlUrl,
-
-      {
-        query,
-
-        variables: {
-          searchQuery,
-        },
-      },
-
-      {
-        headers: {
-          "X-Shopify-Access-Token":
-            accessToken,
-
-          "Content-Type":
-            "application/json",
-
-          Accept:
-            "application/json",
-        },
-
-        timeout:
-          20000,
-      }
-    );
-
-  if (
-    Array.isArray(
-      response.data
-        ?.errors
-    ) &&
-    response.data.errors
-      .length >
-      0
-  ) {
-    const message =
-      response.data.errors
-        .map(
-          (
-            error
-          ) =>
-            error.message
-        )
-        .join(
-          "; "
-        );
-
+  if (response.data?.errors?.length) {
     throw new Error(
-      `Shopify GraphQL error: ${message}`
+      response.data.errors
+        .map(error => error.message)
+        .join("; ")
     );
   }
 
   const orders =
-    response.data
-      ?.data
-      ?.orders
-      ?.nodes;
+    response.data?.data?.orders?.nodes;
 
-  if (
-    !Array.isArray(
-      orders
-    )
-  ) {
+  if (!Array.isArray(orders)) {
     throw new Error(
-      "Shopify did not return an orders array."
+      "Shopify returned an invalid order response."
     );
   }
 
-  const matchingOrder =
-    orders.find(
-      (
-        order
-      ) =>
-        cleanString(
-          order.name
-        )
-          .replace(
-            /^#/,
-            ""
-          )
-          .trim() ===
-        normalizedOrderNumber
-    );
-
-  return (
-    matchingOrder ||
-    null
-  );
+  return orders.find(
+    order =>
+      clean(order.name).replace(/^#/, "") ===
+      normalized
+  ) || null;
 }
 
 /*
-|--------------------------------------------------------------------------
-| Check whether files already exist
-|--------------------------------------------------------------------------
-*/
-
-async function findExistingOrderFiles(
-  order
-) {
-  const existing = [];
-
-  for (
-    const lineItem
-    of order.line_items
-  ) {
-    try {
-      const manifest =
-        await getOrderFiles({
-          orderId:
-            order.id,
-
-          itemId:
-            lineItem.id,
-        });
-
-      if (
-        manifest &&
-        Array.isArray(
-          manifest.files
-        ) &&
-        manifest.files.length >
-          0
-      ) {
-        existing.push({
-          itemId:
-            lineItem.id,
-
-          title:
-            lineItem.title,
-
-          manifest,
-        });
-      }
-    } catch (error) {
-      console.log(
-        `Recovery preflight: no existing manifest for item ${lineItem.id}`
-      );
-    }
-  }
-
-  return existing;
-}
-
-/*
-|--------------------------------------------------------------------------
-| Process journal
-|--------------------------------------------------------------------------
-*/
-
-async function processJournalLineItem({
-  order,
-  orderId,
-  orderNumber,
-  lineItem,
-  productConfiguration,
-}) {
-  const itemId =
-    lineItem.id;
-
-  let generatedFiles =
-    null;
-
-  try {
-    console.log(
-      `Starting JOURNAL PDF generation for order ${orderNumber}, item ${itemId}`
-    );
-
-    generatedFiles =
-      await generateJournalPDFs(
-        order,
-        lineItem
-      );
-
-    if (
-      !generatedFiles
-        ?.interiorPath ||
-      !generatedFiles
-        ?.coverPath
-    ) {
-      throw new Error(
-        `Journal PDF generation did not return both files for item ${itemId}`
-      );
-    }
-
-    console.log(
-      "===== JOURNAL PDF GENERATION COMPLETE ====="
-    );
-
-    console.log({
-      orderId,
-      orderNumber,
-      itemId,
-
-      productKind:
-        "journal",
-
-      totalPages:
-        productConfiguration
-          .totalPages,
-
-      interiorPath:
-        generatedFiles
-          .interiorPath,
-
-      coverPath:
-        generatedFiles
-          .coverPath,
-    });
-
-    const uploadedFiles =
-      await uploadGeneratedPDFs({
-        interiorPath:
-          generatedFiles
-            .interiorPath,
-
-        coverPath:
-          generatedFiles
-            .coverPath,
-
-        orderId,
-
-        itemId,
-      });
-
-    if (
-      !uploadedFiles
-        ?.interior
-        ?.url ||
-      !uploadedFiles
-        ?.cover
-        ?.url ||
-      !uploadedFiles
-        ?.interior
-        ?.md5sum ||
-      !uploadedFiles
-        ?.cover
-        ?.md5sum
-    ) {
-      throw new Error(
-        `Cloudinary did not return complete journal files for item ${itemId}`
-      );
-    }
-
-    console.log(
-      "===== JOURNAL CLOUDINARY UPLOAD COMPLETE ====="
-    );
-
-    console.log({
-      orderId,
-      orderNumber,
-      itemId,
-
-      interiorUrl:
-        uploadedFiles
-          .interior
-          .url,
-
-      coverUrl:
-        uploadedFiles
-          .cover
-          .url,
-    });
-
-    const storedFiles =
-      await saveOrderFiles({
-        orderId,
-        orderNumber,
-        itemId,
-
-        files: [
-          uploadedFiles
-            .interior,
-
-          uploadedFiles
-            .cover,
-        ],
-      });
-
-    if (
-      !storedFiles
-        ?.manifestUrl
-    ) {
-      throw new Error(
-        `The journal file manifest was not saved correctly for item ${itemId}`
-      );
-    }
-
-    const cloudprinterResult =
-      await submitCloudprinterOrder({
-        order,
-        lineItem,
-        uploadedFiles,
-
-        totalPages:
-          productConfiguration
-            .totalPages,
-
-        productConfiguration,
-      });
-
-    if (
-      !cloudprinterResult
-        ?.success
-    ) {
-      throw new Error(
-        `Cloudprinter did not confirm the journal order for item ${itemId}`
-      );
-    }
-
-    return {
-      success:
-        true,
-
-      productKind:
-        "journal",
-
-      itemId,
-
-      title:
-        lineItem.title,
-
-      quantity:
-        lineItem.quantity,
-
-      totalPages:
-        productConfiguration
-          .totalPages,
-
-      manifestUrl:
-        storedFiles
-          .manifestUrl,
-
-      cloudprinterOrderReference:
-        cloudprinterResult
-          .orderReference,
-
-      cloudprinterItemReference:
-        cloudprinterResult
-          .itemReference,
-
-      cloudprinterStatus:
-        cloudprinterResult
-          .status,
-    };
-  } finally {
-    if (
-      generatedFiles
-        ?.interiorPath ||
-      generatedFiles
-        ?.coverPath
-    ) {
-      await deleteGeneratedLocalFiles({
-        interiorPath:
-          generatedFiles
-            ?.interiorPath,
-
-        coverPath:
-          generatedFiles
-            ?.coverPath,
-      });
-    }
-  }
-}
-
-/*
-|--------------------------------------------------------------------------
-| Process notebook
-|--------------------------------------------------------------------------
-*/
-
-async function processNotebookLineItem({
-  order,
-  orderId,
-  orderNumber,
-  lineItem,
-  productConfiguration,
-}) {
-  const itemId =
-    lineItem.id;
-
-  let generatedFiles =
-    null;
-
-  try {
-    console.log(
-      `Starting NOTEBOOK PDF generation for order ${orderNumber}, item ${itemId}`
-    );
-
-    generatedFiles =
-      await generateNotebookPDFs(
-        order,
-        lineItem
-      );
-
-    if (
-      !generatedFiles
-        ?.interiorPath ||
-      !generatedFiles
-        ?.coverPath
-    ) {
-      throw new Error(
-        `Notebook PDF generation did not return both files for item ${itemId}`
-      );
-    }
-
-    if (
-      Number(
-        generatedFiles
-          .totalPages
-      ) !==
-      Number(
-        productConfiguration
-          .totalPages
-      )
-    ) {
-      throw new Error(
-        `Notebook item ${itemId} generated ${generatedFiles.totalPages} interior pages; expected ${productConfiguration.totalPages}`
-      );
-    }
-
-    if (
-      Number(
-        generatedFiles
-          .coverPages
-      ) !==
-      2
-    ) {
-      throw new Error(
-        `Notebook item ${itemId} generated ${generatedFiles.coverPages} cover pages; expected 2`
-      );
-    }
-
-    console.log(
-      "===== NOTEBOOK PDF GENERATION COMPLETE ====="
-    );
-
-    console.log({
-      orderId,
-      orderNumber,
-      itemId,
-
-      productKind:
-        "notebook",
-
-      sku:
-        lineItem.sku,
-
-      totalPages:
-        generatedFiles
-          .totalPages,
-
-      coverPages:
-        generatedFiles
-          .coverPages,
-
-      interiorPath:
-        generatedFiles
-          .interiorPath,
-
-      coverPath:
-        generatedFiles
-          .coverPath,
-
-      dimensions:
-        generatedFiles
-          .dimensions,
-    });
-
-    const uploadedFiles =
-      await uploadGeneratedPDFs({
-        interiorPath:
-          generatedFiles
-            .interiorPath,
-
-        coverPath:
-          generatedFiles
-            .coverPath,
-
-        orderId,
-
-        itemId,
-      });
-
-    if (
-      !uploadedFiles
-        ?.interior
-        ?.url ||
-      !uploadedFiles
-        ?.cover
-        ?.url ||
-      !uploadedFiles
-        ?.interior
-        ?.md5sum ||
-      !uploadedFiles
-        ?.cover
-        ?.md5sum
-    ) {
-      throw new Error(
-        `Cloudinary did not return complete notebook files for item ${itemId}`
-      );
-    }
-
-    console.log(
-      "===== NOTEBOOK CLOUDINARY UPLOAD COMPLETE ====="
-    );
-
-    console.log({
-      orderId,
-      orderNumber,
-      itemId,
-
-      interiorUrl:
-        uploadedFiles
-          .interior
-          .url,
-
-      interiorMd5:
-        uploadedFiles
-          .interior
-          .md5sum,
-
-      coverUrl:
-        uploadedFiles
-          .cover
-          .url,
-
-      coverMd5:
-        uploadedFiles
-          .cover
-          .md5sum,
-    });
-
-    const storedFiles =
-      await saveOrderFiles({
-        orderId,
-        orderNumber,
-        itemId,
-
-        files: [
-          uploadedFiles
-            .interior,
-
-          uploadedFiles
-            .cover,
-        ],
-      });
-
-    if (
-      !storedFiles
-        ?.manifestUrl
-    ) {
-      throw new Error(
-        `The notebook file manifest was not saved correctly for item ${itemId}`
-      );
-    }
-
-    const cloudprinterResult =
-      await submitCloudprinterOrder({
-        order,
-        lineItem,
-        uploadedFiles,
-
-        totalPages:
-          productConfiguration
-            .totalPages,
-
-        productConfiguration,
-      });
-
-    if (
-      !cloudprinterResult
-        ?.success
-    ) {
-      throw new Error(
-        `Cloudprinter did not confirm the notebook order for item ${itemId}`
-      );
-    }
-
-    return {
-      success:
-        true,
-
-      productKind:
-        "notebook",
-
-      itemId,
-
-      title:
-        lineItem.title,
-
-      quantity:
-        lineItem.quantity,
-
-      totalPages:
-        productConfiguration
-          .totalPages,
-
-      coverPages:
-        generatedFiles
-          .coverPages,
-
-      manifestUrl:
-        storedFiles
-          .manifestUrl,
-
-      cloudprinterOrderReference:
-        cloudprinterResult
-          .orderReference,
-
-      cloudprinterItemReference:
-        cloudprinterResult
-          .itemReference,
-
-      cloudprinterStatus:
-        cloudprinterResult
-          .status,
-    };
-  } finally {
-    if (
-      generatedFiles
-        ?.interiorPath ||
-      generatedFiles
-        ?.coverPath
-    ) {
-      await deleteGeneratedLocalFiles({
-        interiorPath:
-          generatedFiles
-            ?.interiorPath,
-
-        coverPath:
-          generatedFiles
-            ?.coverPath,
-      });
-    }
-  }
-}
-
-/*
-|--------------------------------------------------------------------------
-| Process calendar
-|--------------------------------------------------------------------------
-*/
-
-async function processCalendarLineItem({
-  order,
-  orderId,
-  orderNumber,
-  lineItem,
-  productConfiguration,
-}) {
-  const itemId =
-    lineItem.id;
-
-  let generatedFiles =
-    null;
-
-  try {
-    console.log(
-      `Starting CALENDAR PDF generation for order ${orderNumber}, item ${itemId}`
-    );
-
-    generatedFiles =
-      await generateCalendarPDFs(
-        order,
-        lineItem
-      );
-
-    if (
-      !generatedFiles
-        ?.productPath
-    ) {
-      throw new Error(
-        `Calendar PDF generation did not return productPath for item ${itemId}`
-      );
-    }
-
-    if (
-      Number(
-        generatedFiles
-          .totalPages
-      ) !==
-      Number(
-        productConfiguration
-          .totalPages
-      )
-    ) {
-      throw new Error(
-        `Calendar item ${itemId} generated ${generatedFiles.totalPages} pages; expected ${productConfiguration.totalPages}`
-      );
-    }
-
-    console.log(
-      "===== CALENDAR PDF GENERATION COMPLETE ====="
-    );
-
-    console.log({
-      orderId,
-      orderNumber,
-      itemId,
-
-      productKind:
-        "calendar",
-
-      sku:
-        lineItem.sku,
-
-      totalPages:
-        generatedFiles
-          .totalPages,
-
-      productPath:
-        generatedFiles
-          .productPath,
-
-      dimensions:
-        generatedFiles
-          .dimensions,
-    });
-
-    const uploadedProduct =
-      await uploadCalendarPdf({
-        filePath:
-          generatedFiles
-            .productPath,
-
-        orderId,
-
-        itemId,
-      });
-
-    if (
-      !uploadedProduct
-        ?.url ||
-      !uploadedProduct
-        ?.md5sum
-    ) {
-      throw new Error(
-        `Cloudinary did not return a complete calendar product file for item ${itemId}`
-      );
-    }
-
-    const uploadedFiles = {
-      product:
-        uploadedProduct,
-    };
-
-    console.log(
-      "===== CALENDAR CLOUDINARY UPLOAD COMPLETE ====="
-    );
-
-    console.log({
-      orderId,
-      orderNumber,
-      itemId,
-
-      productUrl:
-        uploadedProduct
-          .url,
-
-      productMd5:
-        uploadedProduct
-          .md5sum,
-    });
-
-    const storedFiles =
-      await saveOrderFiles({
-        orderId,
-        orderNumber,
-        itemId,
-
-        files: [
-          uploadedProduct,
-        ],
-      });
-
-    if (
-      !storedFiles
-        ?.manifestUrl
-    ) {
-      throw new Error(
-        `The calendar file manifest was not saved correctly for item ${itemId}`
-      );
-    }
-
-    const cloudprinterResult =
-      await submitCloudprinterOrder({
-        order,
-        lineItem,
-        uploadedFiles,
-
-        totalPages:
-          productConfiguration
-            .totalPages,
-
-        productConfiguration,
-      });
-
-    if (
-      !cloudprinterResult
-        ?.success
-    ) {
-      throw new Error(
-        `Cloudprinter did not confirm the calendar order for item ${itemId}`
-      );
-    }
-
-    return {
-      success:
-        true,
-
-      productKind:
-        "calendar",
-
-      itemId,
-
-      title:
-        lineItem.title,
-
-      quantity:
-        lineItem.quantity,
-
-      totalPages:
-        productConfiguration
-          .totalPages,
-
-      manifestUrl:
-        storedFiles
-          .manifestUrl,
-
-      cloudprinterOrderReference:
-        cloudprinterResult
-          .orderReference,
-
-      cloudprinterItemReference:
-        cloudprinterResult
-          .itemReference,
-
-      cloudprinterStatus:
-        cloudprinterResult
-          .status,
-    };
-  } finally {
-    if (
-      generatedFiles
-        ?.productPath
-    ) {
-      await deleteCalendarLocalFile(
-        generatedFiles
-          .productPath
-      );
-    }
-  }
-}
-
-/*
-|--------------------------------------------------------------------------
-| Resolve and process one line item
-|--------------------------------------------------------------------------
-*/
-
-async function processLineItem({
-  order,
-  orderId,
-  orderNumber,
-  lineItem,
-  lineItemIndex,
-  totalLineItems,
-}) {
-  const itemId =
-    lineItem.id;
-
-  console.log(
-    `Starting line item ${
-      lineItemIndex + 1
-    } of ${totalLineItems}`
-  );
-
-  const productConfiguration =
-    resolveProduct(
-      lineItem
-    );
-
-  console.log({
-    orderId,
-    orderNumber,
-    itemId,
-
-    title:
-      lineItem.title,
-
-    variantTitle:
-      lineItem
-        .variant_title,
-
-    sku:
-      lineItem.sku,
-
-    quantity:
-      lineItem.quantity,
-
-    resolvedProductKind:
-      productConfiguration
-        .kind,
-
-    cloudprinterProductReference:
-      productConfiguration
-        .productReference,
-  });
-
-  try {
-    if (
-      productConfiguration
-        .kind ===
-      "calendar"
-    ) {
-      return await processCalendarLineItem({
-        order,
-        orderId,
-        orderNumber,
-        lineItem,
-        productConfiguration,
-      });
-    }
-
-    if (
-      productConfiguration
-        .kind ===
-      "notebook"
-    ) {
-      return await processNotebookLineItem({
-        order,
-        orderId,
-        orderNumber,
-        lineItem,
-        productConfiguration,
-      });
-    }
-
-    if (
-      productConfiguration
-        .kind ===
-      "journal"
-    ) {
-      return await processJournalLineItem({
-        order,
-        orderId,
-        orderNumber,
-        lineItem,
-        productConfiguration,
-      });
-    }
-
-    throw new Error(
-      `Unsupported product kind: ${productConfiguration.kind}`
-    );
-  } catch (error) {
-    console.error(
-      `Processing failed for line item ${itemId}`
-    );
-
-    console.error({
-      orderId,
-      orderNumber,
-      itemId,
-
-      title:
-        lineItem.title,
-
-      sku:
-        lineItem.sku,
-
-      productKind:
-        productConfiguration
-          .kind,
-
-      message:
-        error.message,
-
-      stack:
-        error.stack,
-    });
-
-    return {
-      success:
-        false,
-
-      productKind:
-        productConfiguration
-          .kind,
-
-      itemId,
-
-      title:
-        lineItem.title,
-
-      quantity:
-        lineItem.quantity,
-
-      error:
-        error.message,
-    };
-  }
-}
-
-/*
-|--------------------------------------------------------------------------
-| Process complete Shopify order
-|--------------------------------------------------------------------------
-*/
-
-async function processOrderInBackground(
-  order
-) {
-  const orderId =
-    order.id;
-
-  const orderNumber =
-    order.order_number ||
-    order.id ||
-    Date.now();
-
-  const allLineItems =
-    Array.isArray(
-      order.line_items
-    )
-      ? order.line_items
-      : [];
-
-  const validLineItems =
-    allLineItems.filter(
-      isValidLineItem
-    );
-
-  if (
-    validLineItems.length ===
-    0
-  ) {
-    throw new Error(
-      "The Shopify order does not contain any valid line items"
-    );
-  }
-
-  console.log(
-    "===== BACKGROUND ORDER PROCESSING STARTED ====="
-  );
-
-  console.log({
-    orderId,
-    orderNumber,
-
-    totalLineItems:
-      allLineItems.length,
-
-    validLineItems:
-      validLineItems.length,
-
-    financialStatus:
-      order.financial_status,
-  });
-
-  const results = [];
-
-  /*
-   * Process sequentially to avoid multiple large PDF generators
-   * competing for Render memory at the same time.
-   */
-
-  for (
-    let index = 0;
-    index <
-    validLineItems.length;
-    index += 1
-  ) {
-    const lineItem =
-      validLineItems[
-        index
-      ];
-
-    const result =
-      await processLineItem({
-        order,
-        orderId,
-        orderNumber,
-        lineItem,
-
-        lineItemIndex:
-          index,
-
-        totalLineItems:
-          validLineItems
-            .length,
-      });
-
-    results.push(
-      result
-    );
-  }
-
-  const successfulItems =
-    results.filter(
-      (
-        result
-      ) =>
-        result.success
-    );
-
-  const failedItems =
-    results.filter(
-      (
-        result
-      ) =>
-        !result.success
-    );
-
-  console.log(
-    "===== ORDER PROCESSING SUMMARY ====="
-  );
-
-  console.log({
-    orderId,
-    orderNumber,
-
-    totalItems:
-      results.length,
-
-    successfulItems:
-      successfulItems
-        .length,
-
-    failedItems:
-      failedItems.length,
-
-    results,
-  });
-
-  if (
-    failedItems.length >
-    0
-  ) {
-    console.error(
-      `Order ${orderNumber} completed with ${failedItems.length} failed line item(s)`
-    );
-  }
-
-  if (
-    successfulItems.length ===
-    results.length
-  ) {
-    console.log(
-      `✅ Order ${orderNumber} processing and Cloudprinter submission complete`
-    );
-  } else if (
-    successfulItems.length >
-    0
-  ) {
-    console.log(
-      `⚠️ Order ${orderNumber} partially completed`
-    );
-  } else {
-    console.error(
-      `❌ Order ${orderNumber} failed completely`
-    );
-  }
-
-  return {
-    results,
-
-    successfulItems,
-
-    failedItems,
-
-    allSucceeded:
-      failedItems.length ===
-      0,
-  };
-}
-
-/*
-|--------------------------------------------------------------------------
-| POST /shopify/reprocess
-|--------------------------------------------------------------------------
-|
-| Manually recovers an existing PAID Shopify order that was missed
-| while Render/API was unavailable.
-|
-| It does NOT create a new Shopify order.
-| It does NOT charge the customer.
-|
-*/
+ * --------------------------------------------------
+ * POST /shopify/reprocess
+ * --------------------------------------------------
+ *
+ * Reprocesses an existing paid Shopify order.
+ * Does not charge the customer.
+ */
 
 router.post(
   "/reprocess",
-
-  express.json({
-    limit:
-      "1mb",
-  }),
-
-  async (
-    req,
-    res
-  ) => {
+  express.json({ limit: "1mb" }),
+  async (req, res) => {
     try {
-      const expectedSecret =
-        cleanString(
-          process.env
-            .ORDER_REPROCESS_SECRET
-        );
+      const expectedSecret = clean(
+        process.env.ORDER_REPROCESS_SECRET
+      );
 
-      if (
-        !expectedSecret
-      ) {
-        return res
-          .status(
-            500
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              "ORDER_REPROCESS_SECRET is not configured in Render.",
-          });
+      if (!expectedSecret) {
+        return res.status(500).json({
+          success: false,
+          message:
+            "ORDER_REPROCESS_SECRET is missing.",
+        });
       }
 
-      const suppliedSecret =
-        cleanString(
-          req.get(
-            "X-Reprocess-Secret"
-          )
-        );
-
       if (
-        !safeSecretEqual(
-          suppliedSecret,
+        !safeEqual(
+          req.get("X-Reprocess-Secret"),
           expectedSecret
         )
       ) {
-        return res
-          .status(
-            401
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              "Unauthorized",
-          });
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized",
+        });
       }
 
-      const orderNumber =
-        cleanString(
-          req.body
-            ?.orderNumber
-        )
-          .replace(
-            /^#/,
-            ""
-          )
-          .trim();
+      const orderNumber = clean(
+        req.body?.orderNumber
+      ).replace(/^#/, "");
 
-      if (
-        !orderNumber
-      ) {
-        return res
-          .status(
-            400
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              "orderNumber is required.",
-          });
+      if (!orderNumber) {
+        return res.status(400).json({
+          success: false,
+          message: "orderNumber is required.",
+        });
       }
-
-      if (
-        recoveryOrdersInProgress.has(
-          orderNumber
-        )
-      ) {
-        return res
-          .status(
-            409
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              `Order #${orderNumber} is already being recovered.`,
-          });
-      }
-
-      console.log(
-        "========================================"
-      );
-
-      console.log(
-        `MANUAL RECOVERY REQUESTED FOR ORDER #${orderNumber}`
-      );
-
-      console.log(
-        "========================================"
-      );
 
       const graphqlOrder =
         await findShopifyOrderForRecovery(
           orderNumber
         );
 
-      if (
-        !graphqlOrder
-      ) {
-        return res
-          .status(
-            404
-          )
-          .json({
-            success:
-              false,
+      if (!graphqlOrder) {
+        return res.status(404).json({
+          success: false,
+          message: "Shopify order not found.",
+        });
+      }
 
-            message:
-              `Shopify order #${orderNumber} was not found.`,
-          });
+      if (graphqlOrder.cancelledAt) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Cancelled orders cannot be recovered.",
+        });
       }
 
       if (
-        graphqlOrder
-          .cancelledAt
+        clean(
+          graphqlOrder.displayFinancialStatus
+        ).toUpperCase() !== "PAID"
       ) {
-        return res
-          .status(
-            409
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              `Order #${orderNumber} is cancelled in Shopify and will not be reprocessed.`,
-          });
-      }
-
-      const financialStatus =
-        cleanString(
-          graphqlOrder
-            .displayFinancialStatus
-        ).toUpperCase();
-
-      if (
-        financialStatus !==
-        "PAID"
-      ) {
-        return res
-          .status(
-            409
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              `Order #${orderNumber} is not marked PAID in Shopify. Current status: ${
-                financialStatus ||
-                "UNKNOWN"
-              }.`,
-          });
+        return res.status(409).json({
+          success: false,
+          message:
+            "Only PAID orders can be recovered.",
+        });
       }
 
       const order =
-        convertGraphqlOrder(
-          graphqlOrder
-        );
+        convertGraphqlOrder(graphqlOrder);
 
-      console.log(
-        "===== RECOVERED SHOPIFY ORDER ====="
-      );
+      const existing =
+        await findExistingOrderFiles(order);
 
-      console.log({
-        orderId:
-          order.id,
-
-        orderNumber:
-          order
-            .order_number,
-
-        orderName:
-          order.name,
-
-        email:
-          order.email,
-
-        financialStatus:
-          order
-            .financial_status,
-
-        lineItems:
-          order
-            .line_items
-            .length,
-
-        hasShippingAddress:
-          Boolean(
-            order
-              .shipping_address
-          ),
-
-        hasBillingAddress:
-          Boolean(
-            order
-              .billing_address
-          ),
-      });
-
-      order
-        .line_items
-        .forEach(
-          (
-            lineItem,
-            index
-          ) => {
-            console.log(
-              `Recovered product ${
-                index + 1
-              }:`,
-              {
-                id:
-                  lineItem.id,
-
-                title:
-                  lineItem
-                    .title,
-
-                sku:
-                  lineItem.sku,
-
-                quantity:
-                  lineItem
-                    .quantity,
-
-                variantTitle:
-                  lineItem
-                    .variant_title,
-
-                propertyCount:
-                  lineItem
-                    .properties
-                    .length,
-
-                properties:
-                  lineItem
-                    .properties,
-              }
-            );
-          }
-        );
-
-      /*
-       * Prevent accidental duplicate production.
-       */
-
-      const existingFiles =
-        await findExistingOrderFiles(
-          order
-        );
-
-      if (
-        existingFiles.length >
-        0
-      ) {
-        return res
-          .status(
-            409
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              "This order already has generated files. Recovery was stopped to prevent duplicate production.",
-
-            existingItems:
-              existingFiles.map(
-                (
-                  entry
-                ) => ({
-                  itemId:
-                    entry
-                      .itemId,
-
-                  title:
-                    entry
-                      .title,
-                })
-              ),
-          });
-      }
-
-      recoveryOrdersInProgress.add(
-        orderNumber
-      );
-
-      /*
-       * Respond first because PDF generation can take a while.
-       */
-
-      res
-        .status(
-          202
-        )
-        .json({
-          success:
-            true,
-
+      if (existing.length) {
+        return res.status(409).json({
+          success: false,
           message:
-            `Order #${orderNumber} was found, verified as paid, and accepted for recovery.`,
-
-          orderId:
-            order.id,
-
-          orderNumber:
-            order
-              .order_number,
-
-          lineItemCount:
-            order
-              .line_items
-              .length,
-
-          nextStep:
-            "Watch the Render logs for generation, Cloudinary upload, manifest creation and Cloudprinter submission.",
+            "Generated files already exist. " +
+            "Recovery stopped to avoid duplicates.",
+          existingItems: existing.map(item => ({
+            itemId: item.itemId,
+            title: item.title,
+          })),
         });
-
-      setImmediate(
-        () => {
-          processOrderInBackground(
-            order
-          )
-            .then(
-              (
-                summary
-              ) => {
-                console.log(
-                  "========================================"
-                );
-
-                if (
-                  summary
-                    .allSucceeded
-                ) {
-                  console.log(
-                    `✅ MANUAL RECOVERY COMPLETE FOR ORDER #${orderNumber}`
-                  );
-                } else {
-                  console.error(
-                    `❌ MANUAL RECOVERY FINISHED WITH FAILURES FOR ORDER #${orderNumber}`
-                  );
-
-                  console.error({
-                    failedItems:
-                      summary
-                        .failedItems,
-                  });
-                }
-
-                console.log(
-                  "========================================"
-                );
-              }
-            )
-            .catch(
-              (
-                error
-              ) => {
-                console.error(
-                  "========================================"
-                );
-
-                console.error(
-                  `❌ MANUAL RECOVERY FAILED FOR ORDER #${orderNumber}`
-                );
-
-                console.error({
-                  message:
-                    error
-                      .message,
-
-                  stack:
-                    error
-                      .stack,
-                });
-
-                console.error(
-                  "========================================"
-                );
-              }
-            )
-            .finally(
-              () => {
-                recoveryOrdersInProgress.delete(
-                  orderNumber
-                );
-              }
-            );
-        }
-      );
-
-      return;
-    } catch (
-      error
-    ) {
-      console.error(
-        "Manual Shopify order recovery failed"
-      );
-
-      console.error({
-        message:
-          error.message,
-
-        responseStatus:
-          error
-            .response
-            ?.status,
-
-        responseData:
-          error
-            .response
-            ?.data,
-
-        stack:
-          error.stack,
-      });
-
-      if (
-        !res.headersSent
-      ) {
-        return res
-          .status(
-            500
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              error.message ||
-              "Unable to recover Shopify order.",
-          });
       }
 
+      if (
+        process.env.LULU_ENABLED !== "true"
+      ) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Lulu is disabled. Recovery will not " +
+            "submit a print job.",
+        });
+      }
+
+      if (
+        ordersInProgress.has(String(order.id))
+      ) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "This order is already processing.",
+        });
+      }
+
+      res.status(202).json({
+        success: true,
+        message:
+          `Order #${orderNumber} accepted for recovery.`,
+        orderId: order.id,
+        lineItemCount: order.line_items.length,
+      });
+
+      setImmediate(() => {
+        processOrderInBackground(order)
+          .then(summary => {
+            console.log(
+              "RECOVERY RESULT",
+              {
+                orderNumber,
+                allSucceeded: summary.allSucceeded,
+                failedItems: summary.failedItems,
+              }
+            );
+          })
+          .catch(error => {
+            console.error(
+              "RECOVERY FAILED",
+              error
+            );
+          });
+      });
+
       return;
+    } catch (error) {
+      console.error(
+        "Shopify recovery error:",
+        error
+      );
+
+      if (!res.headersSent) {
+        return res.status(500).json({
+          success: false,
+          message: error.message,
+        });
+      }
     }
   }
 );
 
 /*
-|--------------------------------------------------------------------------
-| POST /shopify/order
-|--------------------------------------------------------------------------
-*/
+ * --------------------------------------------------
+ * POST /shopify/order
+ * --------------------------------------------------
+ *
+ * Shopify order webhook.
+ *
+ * IMPORTANT:
+ * Must receive an unmodified raw request body.
+ */
 
 router.post(
   "/order",
-
   express.raw({
-    type:
-      "application/json",
+    type: "application/json",
   }),
-
-  async (
-    req,
-    res
-  ) => {
+  async (req, res) => {
     try {
-      const shopifyHmac =
-        req.get(
-          "X-Shopify-Hmac-Sha256"
-        );
+      const hmac = req.get(
+        "X-Shopify-Hmac-Sha256"
+      );
 
-      const webhookSecret =
-        process.env
-          .SHOPIFY_WEBHOOK_SECRET;
+      const secret =
+        process.env.SHOPIFY_WEBHOOK_SECRET;
 
       if (
-        !shopifyHmac
-      ) {
-        console.error(
-          "Missing Shopify webhook HMAC header"
-        );
-
-        return res
-          .status(
-            401
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              "Unauthorized",
-          });
-      }
-
-      if (
-        !webhookSecret
-      ) {
-        console.error(
-          "SHOPIFY_WEBHOOK_SECRET is not configured"
-        );
-
-        return res
-          .status(
-            500
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              "Webhook configuration error",
-          });
-      }
-
-      if (
-        !Buffer.isBuffer(
-          req.body
+        !verifyShopifyWebhook(
+          req.body,
+          hmac,
+          secret
         )
       ) {
-        console.error(
-          "Shopify webhook body is not a raw Buffer"
-        );
-
-        return res
-          .status(
-            400
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              "Invalid webhook body",
-          });
-      }
-
-      const isValid =
-        verifyShopifyWebhook({
-          rawBody:
-            req.body,
-
-          receivedHmac:
-            shopifyHmac,
-
-          webhookSecret,
+        return res.status(401).json({
+          success: false,
+          message:
+            "Invalid Shopify webhook signature.",
         });
-
-      if (
-        !isValid
-      ) {
-        console.error(
-          "Invalid Shopify webhook signature"
-        );
-
-        return res
-          .status(
-            401
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              "Unauthorized",
-          });
       }
 
       let order;
 
       try {
-        order =
-          JSON.parse(
-            req.body.toString(
-              "utf8"
-            )
-          );
-      } catch (
-        error
-      ) {
-        console.error(
-          "Unable to parse Shopify webhook JSON"
+        order = JSON.parse(
+          req.body.toString("utf8")
         );
-
-        console.error({
-          message:
-            error
-              .message,
-
-          stack:
-            error
-              .stack,
+      } catch {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid Shopify JSON.",
         });
+      }
 
-        return res
-          .status(
-            400
-          )
-          .json({
-            success:
-              false,
+      if (!order?.id) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Missing Shopify order ID.",
+        });
+      }
 
-            message:
-              "Invalid JSON",
-          });
+      if (!isPaid(order)) {
+        return res.status(200).json({
+          success: true,
+          message:
+            "Order acknowledged; not paid. " +
+            "Fulfillment was not started.",
+        });
       }
 
       if (
-        !order?.id
+        process.env.LULU_ENABLED !== "true"
       ) {
-        console.error(
-          "Shopify webhook does not contain an order ID"
+        console.warn(
+          "Lulu is disabled. " +
+          "Shopify order will not be submitted.",
+          { orderId: order.id }
         );
 
-        return res
-          .status(
-            400
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              "Invalid Shopify order",
-          });
+        return res.status(200).json({
+          success: true,
+          message:
+            "Order verified. Lulu fulfillment disabled.",
+          orderId: order.id,
+        });
       }
 
-      const orderId =
-        order.id;
-
-      const orderNumber =
-        order.order_number ||
-        order.id ||
-        Date.now();
-
-      const lineItems =
-        Array.isArray(
-          order.line_items
-        )
-          ? order
-              .line_items
-          : [];
-
       console.log(
-        "✅ Verified Shopify order received"
-      );
-
-      console.log(
-        "===== ORDER ====="
-      );
-
-      console.log({
-        id:
-          orderId,
-
-        orderNumber,
-
-        orderName:
-          order.name,
-
-        email:
-          order.email,
-
-        financialStatus:
-          order
-            .financial_status,
-
-        fulfillmentStatus:
-          order
-            .fulfillment_status,
-
-        createdAt:
-          order
-            .created_at,
-
-        lineItemCount:
-          lineItems
-            .length,
-      });
-
-      console.log(
-        "===== PRODUCTS ====="
-      );
-
-      lineItems.forEach(
-        (
-          item,
-          index
-        ) => {
-          const productConfiguration =
-            resolveProduct(
-              item
-            );
-
-          console.log(
-            `Product ${
-              index + 1
-            }:`,
-            {
-              lineItemId:
-                item.id,
-
-              productId:
-                item
-                  .product_id,
-
-              variantId:
-                item
-                  .variant_id,
-
-              title:
-                item.title,
-
-              variantTitle:
-                item
-                  .variant_title,
-
-              quantity:
-                item
-                  .quantity,
-
-              sku:
-                item.sku,
-
-              resolvedProductKind:
-                productConfiguration
-                  .kind,
-
-              productReference:
-                productConfiguration
-                  .productReference,
-
-              properties:
-                item
-                  .properties,
-            }
-          );
-        }
-      );
-
-      /*
-       * Respond to Shopify before generating the large PDFs.
-       */
-
-      res
-        .status(
-          200
-        )
-        .json({
-          success:
-            true,
-
-          message:
-            "Verified Shopify order accepted",
-
-          orderId,
-
-          orderNumber,
-
+        "===== VERIFIED SHOPIFY ORDER =====",
+        {
+          orderId: order.id,
+          orderNumber: orderNumberOf(order),
           lineItemCount:
-            lineItems
-              .length,
-        });
-
-      /*
-       * Generate, upload and submit after Shopify receives its ACK.
-       */
-
-      setImmediate(
-        () => {
-          processOrderInBackground(
-            order
-          ).catch(
-            (
-              error
-            ) => {
-              console.error(
-                "Background order processing failed"
-              );
-
-              console.error({
-                orderId,
-                orderNumber,
-
-                message:
-                  error
-                    .message,
-
-                stack:
-                  error
-                    .stack,
-              });
-            }
-          );
+            order.line_items?.length || 0,
         }
       );
 
-      return;
-    } catch (
-      error
-    ) {
-      console.error(
-        "Shopify webhook processing failed"
-      );
-
-      console.error({
+      // Respond quickly to Shopify, then process.
+      res.status(200).json({
+        success: true,
         message:
-          error.message,
-
-        stack:
-          error.stack,
+          "Shopify order accepted for Lulu processing.",
+        orderId: order.id,
+        orderNumber: orderNumberOf(order),
       });
 
-      if (
-        !res.headersSent
-      ) {
-        return res
-          .status(
-            500
-          )
-          .json({
-            success:
-              false,
-
-            message:
-              "Order processing failed",
+      setImmediate(() => {
+        processOrderInBackground(order)
+          .then(summary => {
+            console.log(
+              "SHOPIFY ORDER COMPLETE",
+              {
+                orderId: order.id,
+                allSucceeded: summary.allSucceeded,
+                failedItems: summary.failedItems,
+              }
+            );
+          })
+          .catch(error => {
+            console.error(
+              "SHOPIFY PROCESSING FAILED",
+              {
+                orderId: order.id,
+                message: error.message,
+                stack: error.stack,
+              }
+            );
           });
-      }
+      });
 
       return;
+    } catch (error) {
+      console.error(
+        "Shopify webhook failure:",
+        error
+      );
+
+      if (!res.headersSent) {
+        return res.status(500).json({
+          success: false,
+          message: "Order processing failed.",
+        });
+      }
     }
   }
 );
 
-module.exports =
-  router;
+module.exports = router;
