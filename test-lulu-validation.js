@@ -2,68 +2,30 @@
 "use strict";
 
 /*
-|--------------------------------------------------------------------------
-| FRESH START PAPER — LULU SANDBOX PDF VALIDATION
-|--------------------------------------------------------------------------
-|
-| Product:
-| US Letter Landscape Hardcover Journal
-|
-| SKU:
-| 1100X0850.FC.STD.CW.060UW444.MXX
-|
-| Interior:
-| 366 pages
-| 810 x 630 PDF points
-|
-| Cover:
-| 1 page
-| 1791 x 738 PDF points
-|
-| This script:
-| 1. Checks Cloudinary PDF accessibility
-| 2. Requests exact Lulu cover dimensions
-| 3. Validates the interior PDF
-| 4. Validates the hardcover PDF
-| 5. Reports validation IDs and statuses
-|
-| It DOES NOT:
-| - Create print jobs
-| - Charge money
-| - Submit Shopify orders
-| - Enable Lulu fulfillment
-|
-|--------------------------------------------------------------------------
-*/
+ * FRESH START PAPER
+ * Lulu Sandbox Journal PDF Validation
+ *
+ * No print jobs created.
+ * No Shopify orders submitted.
+ * No Lulu purchases made.
+ */
 
 const {
   luluRequest,
   getLuluPackageId,
 } = require("./services/luluService");
 
-/*
-|--------------------------------------------------------------------------
-| SANDBOX CONFIGURATION
-|--------------------------------------------------------------------------
-*/
-
-const SANDBOX_URL =
-  "https://api.sandbox.lulu.com";
-
 const API_URL = String(
   process.env.LULU_API_URL || ""
 ).replace(/\/+$/, "");
 
+const SANDBOX_URL =
+  "https://api.sandbox.lulu.com";
+
 const SKU =
   "1100X0850.FC.STD.CW.060UW444.MXX";
 
-const INTERIOR_PAGE_COUNT = 366;
-
-/*
-|--------------------------------------------------------------------------
-| YOUR ACTUAL CLOUDINARY FILES
-|--------------------------------------------------------------------------
-*/
+const PAGE_COUNT = 366;
 
 const INTERIOR_URL =
   "https://res.cloudinary.com/slmfyito/image/upload/v1792962824/lulu-order-999999-item-888888-interior_pon4si.pdf";
@@ -71,107 +33,83 @@ const INTERIOR_URL =
 const COVER_URL =
   "https://res.cloudinary.com/slmfyito/image/upload/v1792962824/lulu-order-999999-item-888888-cover_zy4ber.pdf";
 
-/*
-|--------------------------------------------------------------------------
-| SAFETY CHECKS
-|--------------------------------------------------------------------------
-*/
+const CURRENT_COVER = {
+  width: 1791,
+  height: 738,
+};
 
-function validateEnvironment() {
+function heading(value) {
+  console.log(
+    "\n========================================"
+  );
+  console.log(value);
+  console.log(
+    "========================================"
+  );
+}
+
+function verifyEnvironment() {
   if (API_URL !== SANDBOX_URL) {
     throw new Error(
-      "This test must run against " +
-      "https://api.sandbox.lulu.com"
+      "Validation must use Lulu Sandbox."
     );
   }
 
-  const configuredSku =
+  const configuredSKU =
     getLuluPackageId("journal");
 
-  if (configuredSku !== SKU) {
+  if (configuredSKU !== SKU) {
     throw new Error(
-      "Your Render Lulu journal SKU " +
-      "does not match the test SKU. " +
-      `Configured: ${configuredSku}`
+      `SKU mismatch: ${configuredSKU}`
     );
   }
 
-  console.log(
-    "Environment: LULU SANDBOX"
-  );
+  console.log("Environment: SANDBOX");
+  console.log("SKU:", SKU);
+  console.log("Page count:", PAGE_COUNT);
 }
 
-function validateUrl(url, label) {
+async function checkPDF(url, label) {
   const parsed = new URL(url);
 
-  if (parsed.protocol !== "https:") {
-    throw new Error(
-      `${label} must use HTTPS.`
-    );
-  }
-
   if (
-    parsed.hostname !==
-    "res.cloudinary.com"
+    parsed.protocol !== "https:" ||
+    parsed.hostname !== "res.cloudinary.com"
   ) {
     throw new Error(
-      `${label} must use the direct ` +
-      "Cloudinary delivery URL."
+      `${label} must be a direct Cloudinary HTTPS URL.`
     );
   }
-}
 
-/*
-|--------------------------------------------------------------------------
-| CHECK PDF ACCESSIBILITY
-|--------------------------------------------------------------------------
-*/
+  console.log(`Checking ${label}...`);
 
-async function checkPdfAccess(
-  url,
-  label
-) {
-  validateUrl(url, label);
-
-  console.log(
-    `Checking ${label} PDF...`
-  );
-
-  const response = await fetch(
-    url,
-    {
-      method: "GET",
-      headers: {
-        Range: "bytes=0-4",
-      },
-      signal:
-        AbortSignal.timeout(30000),
-    }
-  );
+  const response = await fetch(url, {
+    headers: {
+      Range: "bytes=0-4",
+    },
+    signal: AbortSignal.timeout(30000),
+  });
 
   if (!response.ok) {
     await response.body?.cancel();
 
     throw new Error(
-      `${label} Cloudinary HTTP ` +
-      response.status
+      `${label}: HTTP ${response.status}`
     );
   }
 
-  const reader =
-    response.body.getReader();
-
-  let prefix = Buffer.alloc(0);
+  const reader = response.body.getReader();
+  let received = Buffer.alloc(0);
 
   try {
-    while (prefix.length < 5) {
+    while (received.length < 5) {
       const { done, value } =
         await reader.read();
 
       if (done) break;
 
-      prefix = Buffer.concat([
-        prefix,
+      received = Buffer.concat([
+        received,
         Buffer.from(value),
       ]);
     }
@@ -180,363 +118,264 @@ async function checkPdfAccess(
   }
 
   if (
-    prefix.subarray(0, 5)
+    received.subarray(0, 5)
       .toString("ascii") !== "%PDF-"
   ) {
     throw new Error(
-      `${label} URL did not return PDF data.`
+      `${label} did not return PDF data.`
     );
   }
 
-  console.log(
-    `${label}: PDF ACCESSIBLE`
-  );
+  console.log(`${label}: PDF ACCESSIBLE`);
 }
 
-/*
-|--------------------------------------------------------------------------
-| GET LULU COVER DIMENSIONS
-|--------------------------------------------------------------------------
-*/
-
-async function calculateCoverDimensions() {
-  console.log(
-    "\n===== COVER DIMENSION CHECK ====="
-  );
-
-  const payload = {
-    pod_package_id: SKU,
-
-    interior_page_count:
-      INTERIOR_PAGE_COUNT,
-
-    unit: "in",
-  };
+async function checkCoverDimensions() {
+  heading("LULU COVER DIMENSIONS");
 
   const result = await luluRequest(
     "/cover-dimensions/",
     {
       method: "POST",
-      body: payload,
+      body: {
+        pod_package_id: SKU,
+        interior_page_count: PAGE_COUNT,
+        unit: "IN",
+      },
     }
   );
 
   console.log(
-    "Lulu cover dimensions:",
+    "Lulu response:",
     JSON.stringify(result, null, 2)
   );
 
-  const width =
-    Number(result.width);
+  const dimensions =
+    result.dimensions || result;
 
-  const height =
-    Number(result.height);
+  const width = Number(dimensions.width);
+  const height = Number(dimensions.height);
 
   if (
     Number.isFinite(width) &&
-    Number.isFinite(height)
+    Number.isFinite(height) &&
+    width > 0 &&
+    height > 0
   ) {
+    const unit = String(
+      dimensions.unit || "IN"
+    ).toUpperCase();
+
+    const multiplier = {
+      IN: 72,
+      MM: 72 / 25.4,
+      PT: 1,
+    }[unit];
+
+    if (!multiplier) {
+      console.log(
+        "Unrecognized dimension unit:",
+        unit
+      );
+      return result;
+    }
+
+    const expectedWidth = width * multiplier;
+    const expectedHeight = height * multiplier;
+
     console.log(
-      "Expected PDF dimensions in points:"
+      "Expected cover size in PDF points:",
+      {
+        width: expectedWidth,
+        height: expectedHeight,
+      }
     );
 
-    console.log({
-      width: width * 72,
-      height: height * 72,
-    });
-
     console.log(
-      "Current cover PDF: 1791 x 738 points"
+      "Current cover:",
+      CURRENT_COVER
     );
 
-    const widthMatches =
-      Math.abs(width * 72 - 1791) < 1;
+    const matches =
+      Math.abs(
+        expectedWidth - CURRENT_COVER.width
+      ) < 1 &&
+      Math.abs(
+        expectedHeight - CURRENT_COVER.height
+      ) < 1;
 
-    const heightMatches =
-      Math.abs(height * 72 - 738) < 1;
-
-    if (!widthMatches || !heightMatches) {
-      console.warn(
-        "WARNING: Your cover PDF dimensions " +
-        "do not match Lulu's calculated dimensions."
+    if (matches) {
+      console.log(
+        "COVER DIMENSIONS MATCH"
       );
     } else {
-      console.log(
-        "Cover dimensions match Lulu."
+      console.warn(
+        "COVER DIMENSION MISMATCH"
+      );
+      console.warn(
+        "The PDF generator may require changes."
       );
     }
+  } else {
+    console.log(
+      "Review the Lulu response for exact dimensions."
+    );
   }
 
   return result;
 }
 
-/*
-|--------------------------------------------------------------------------
-| START INTERIOR VALIDATION
-|--------------------------------------------------------------------------
-*/
-
-async function validateInterior() {
-  console.log(
-    "\n===== INTERIOR VALIDATION ====="
-  );
-
-  const result = await luluRequest(
-    "/validate-interior/",
-    {
-      method: "POST",
-
-      body: {
-        source_url:
-          INTERIOR_URL,
-
-        pod_package_id:
-          SKU,
-      },
-    }
-  );
-
-  console.log(
-    "Interior response:",
-    JSON.stringify(result, null, 2)
-  );
-
-  return result;
-}
-
-/*
-|--------------------------------------------------------------------------
-| START COVER VALIDATION
-|--------------------------------------------------------------------------
-*/
-
-async function validateCover() {
-  console.log(
-    "\n===== COVER VALIDATION ====="
-  );
-
-  const result = await luluRequest(
-    "/validate-cover/",
-    {
-      method: "POST",
-
-      body: {
-        source_url:
-          COVER_URL,
-
-        pod_package_id:
-          SKU,
-
-        interior_page_count:
-          INTERIOR_PAGE_COUNT,
-      },
-    }
-  );
-
-  console.log(
-    "Cover response:",
-    JSON.stringify(result, null, 2)
-  );
-
-  return result;
-}
-
-/*
-|--------------------------------------------------------------------------
-| CHECK VALIDATION STATUS
-|--------------------------------------------------------------------------
-*/
-
-async function checkValidationStatus(
-  type,
-  validationId
+async function beginValidation(
+  endpoint,
+  body,
+  label
 ) {
-  if (
-    validationId === undefined ||
-    validationId === null
-  ) {
-    console.warn(
-      `${type}: No validation ID returned.`
+  heading(`${label} VALIDATION`);
+
+  const result = await luluRequest(
+    endpoint,
+    {
+      method: "POST",
+      body,
+    }
+  );
+
+  console.log(
+    `${label} response:`,
+    JSON.stringify(result, null, 2)
+  );
+
+  return result;
+}
+
+async function readValidationStatus(
+  endpoint,
+  response,
+  label
+) {
+  const id =
+    response?.id ||
+    response?.validation_id;
+
+  if (!id) {
+    console.log(
+      `${label}: No validation ID was returned.`
     );
 
-    return null;
+    return response;
   }
 
-  const endpoint =
-    type === "interior"
-      ? "/validate-interior/"
-      : "/validate-cover/";
+  console.log(
+    `${label} validation ID: ${id}`
+  );
 
   const result = await luluRequest(
-    `${endpoint}${encodeURIComponent(
-      validationId
-    )}/`
+    `${endpoint}${encodeURIComponent(id)}/`
   );
 
   console.log(
-    `\n${type.toUpperCase()} STATUS:`,
+    `${label} latest response:`,
     JSON.stringify(result, null, 2)
   );
 
   return result;
 }
 
-/*
-|--------------------------------------------------------------------------
-| REPORT VALIDATION RESULT
-|--------------------------------------------------------------------------
-*/
-
-function explainStatus(
-  label,
-  result
-) {
-  if (!result) return;
+function summarize(label, result) {
+  const rawStatus = result?.status;
 
   const status = String(
-    result.status || ""
+    typeof rawStatus === "object"
+      ? rawStatus?.name || ""
+      : rawStatus || ""
   ).toUpperCase();
 
-  console.log(
-    `${label} validation status: ${status}`
-  );
+  console.log(`${label}: ${status || "UNKNOWN"}`);
+
+  if (result?.errors?.length) {
+    console.log(
+      `${label} errors:`,
+      JSON.stringify(result.errors, null, 2)
+    );
+  }
+
+  if (
+    status === "NORMALIZING" ||
+    status === "VALIDATING" ||
+    status === "PENDING"
+  ) {
+    console.log(
+      `${label} is still processing.`
+    );
+  }
 
   if (
     status === "NORMALIZED" ||
     status === "VALIDATED"
   ) {
     console.log(
-      `${label}: Validation succeeded.`
-    );
-  } else if (
-    status === "VALIDATING" ||
-    status === "NORMALIZING"
-  ) {
-    console.log(
-      `${label}: Processing is still underway.`
-    );
-  } else if (status === "ERROR") {
-    console.error(
-      `${label}: Lulu reported errors:`,
-      JSON.stringify(
-        result.errors || [],
-        null,
-        2
-      )
-    );
-  } else {
-    console.log(
-      `${label}: Review Lulu response.`
+      `${label} passed the reported stage.`
     );
   }
 }
 
-/*
-|--------------------------------------------------------------------------
-| MAIN TEST
-|--------------------------------------------------------------------------
-*/
-
 async function main() {
-  console.log(
-    "\n=================================="
-  );
+  heading("FRESH START PAPER — LULU TEST");
 
-  console.log(
-    "FRESH START PAPER — LULU TEST"
-  );
+  verifyEnvironment();
 
-  console.log(
-    "=================================="
-  );
+  heading("PDF ACCESSIBILITY");
 
-  validateEnvironment();
+  await checkPDF(INTERIOR_URL, "Interior");
+  await checkPDF(COVER_URL, "Cover");
 
-  console.log("SKU:", SKU);
-
-  console.log(
-    "Interior pages:",
-    INTERIOR_PAGE_COUNT
-  );
-
-  /*
-   * Step 1: Verify PDF URLs.
-   */
-
-  await checkPdfAccess(
-    INTERIOR_URL,
-    "Interior"
-  );
-
-  await checkPdfAccess(
-    COVER_URL,
-    "Cover"
-  );
-
-  /*
-   * Step 2: Calculate Lulu cover dimensions.
-   */
-
-  await calculateCoverDimensions();
-
-  /*
-   * Step 3: Request interior validation.
-   */
+  const dimensions =
+    await checkCoverDimensions();
 
   const interior =
-    await validateInterior();
-
-  /*
-   * Step 4: Request cover validation.
-   */
+    await beginValidation(
+      "/validate-interior/",
+      {
+        source_url: INTERIOR_URL,
+        pod_package_id: SKU,
+      },
+      "INTERIOR"
+    );
 
   const cover =
-    await validateCover();
-
-  /*
-   * Step 5: Retrieve initial statuses.
-   */
-
-  const interiorId = interior?.id;
-  const coverId = cover?.id;
-
-  console.log(
-    "\n===== VALIDATION IDS ====="
-  );
-
-  console.log({
-    interiorId,
-    coverId,
-  });
+    await beginValidation(
+      "/validate-cover/",
+      {
+        source_url: COVER_URL,
+        pod_package_id: SKU,
+        interior_page_count: PAGE_COUNT,
+      },
+      "COVER"
+    );
 
   const interiorStatus =
-    await checkValidationStatus(
-      "interior",
-      interiorId
+    await readValidationStatus(
+      "/validate-interior/",
+      interior,
+      "INTERIOR"
     );
 
   const coverStatus =
-    await checkValidationStatus(
-      "cover",
-      coverId
+    await readValidationStatus(
+      "/validate-cover/",
+      cover,
+      "COVER"
     );
 
-  /*
-   * Step 6: Print summary.
-   */
+  heading("RESULT SUMMARY");
 
-  console.log(
-    "\n===== VALIDATION SUMMARY ====="
+  summarize(
+    "Interior",
+    interiorStatus
   );
 
-  explainStatus(
-    "INTERIOR",
-    interiorStatus || interior
-  );
-
-  explainStatus(
-    "COVER",
-    coverStatus || cover
+  summarize(
+    "Cover",
+    coverStatus
   );
 
   console.log(
@@ -544,7 +383,8 @@ async function main() {
   );
 
   console.log(
-    "LULU_ENABLED remains unchanged."
+    "Cover dimensions response:",
+    JSON.stringify(dimensions)
   );
 }
 
